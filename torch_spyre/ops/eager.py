@@ -72,7 +72,8 @@ def register_torch_compile_kernel(ops):
         if "dtype" in op.name():
             # ops that change dtype are not supported yet
             continue
-        compiled_kernel = compile_once(op, dynamic=False)(dispatch_to_torch_compile)
+        compiled_kernel = compile_once(
+            op, dynamic=False)(dispatch_to_torch_compile)
         torch.library.register_kernel(op.name(), ["spyre"])(compiled_kernel)
 
 
@@ -111,6 +112,7 @@ register_torch_compile_kernel(
         aten.maximum,
         aten.pow,
         aten.linalg_vector_norm,
+        aten.where,
     ]
 )
 
@@ -131,7 +133,8 @@ def spyre__normal_(self, mean=0.0, std=1.0, *, generator=None):
     # cpu_tmp = self.to("cpu")
 
     # Create a new tensor on cpu itself to avoid unnecessary data copy.
-    cpu_tmp = torch.empty_like(self, device="cpu", memory_format=torch.preserve_format)
+    cpu_tmp = torch.empty_like(
+        self, device="cpu", memory_format=torch.preserve_format)
     cpu_tmp.normal_(mean, std, generator=generator)
     self.copy_(cpu_tmp)
     return self
@@ -151,7 +154,8 @@ def spyre__zero_(self: torch.Tensor) -> torch.Tensor:
 @torch.library.register_kernel("aten::uniform_", "spyre")  # type:ignore
 def spyre__uniform_(self, from_=0.0, to=1.0, generator=None):
     # Create a new tensor on cpu
-    cpu_tmp = torch.empty_like(self, device="cpu", memory_format=torch.preserve_format)
+    cpu_tmp = torch.empty_like(
+        self, device="cpu", memory_format=torch.preserve_format)
 
     # Fill the CPU tensor with uniform random values
     cpu_tmp.uniform_(from_, to, generator=generator)
