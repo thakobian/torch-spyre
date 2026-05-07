@@ -3429,8 +3429,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
     def test_addmm_scaled_cpu(self, alpha, input, mat1, mat2):
         compare_with_cpu(
-            lambda input, mat1, mat2: torch.addmm(
-                input, mat1, mat2, alpha=alpha),
+            lambda input, mat1, mat2: torch.addmm(input, mat1, mat2, alpha=alpha),
             input,
             mat1,
             mat2,
