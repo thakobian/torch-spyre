@@ -3691,8 +3691,9 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     def test_min_eager(self, op, dim: int, keepdim: bool, x):
         compare_with_cpu(lambda x: op(x, dim=dim, keepdim=keepdim)[0], x)
 
-    def test_where_eager(self, condition, x, y):
-        compare_with_cpu(lambda condition, x, y: op(condition, x, y), x)
+    def test_where_eager(self, op, condition, x, y):
+        compare_with_cpu(lambda condition, x, y: op(
+            condition, x, y), condition, x, y)
 
     def test_attn_qkv_paths(self, q, k, v):
         # This tests the dataflows between rope/qkv projection and SDPA for q, k, and v
