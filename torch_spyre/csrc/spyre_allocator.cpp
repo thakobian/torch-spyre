@@ -132,9 +132,49 @@ c10::DataPtr SpyreAllocator::allocate(size_t nbytes) {
   }
   // Get shared_ptr to keep FlexAllocator alive during operations
   auto flex_alloc = getFlexAllocator();
+  flex::AllocationDirective directive{};
 
   // Allocate first-class raw storage via CompositeAddress.
-  flex::CompositeAddress composite_addr = flex_alloc->allocate(nbytes);
+  flex::CompositeAddress composite_addr =
+      flex_alloc->allocate(nbytes, directive);
+
+  // FlexAllocator rounds up to DEVICE_ALIGNMENT (128 bytes), so the actual
+  // allocation may be larger than the requested nbytes. Use total_size() for
+  // accurate memory profiling.
+  size_t actual_nbytes = composite_addr.total_size();
+
+  auto* ctx = new SharedOwnerCtx(std::move(composite_addr), device_id);
+  void* ctx_void = static_cast<void*>(ctx);
+
+  // Use the SharedOwnerCtx pointer as the unique data handle for c10::DataPtr.
+  // This pointer is never dereferenced — it serves only as a unique token for
+  // memory profiling (recordAlloc/recordRelease).
+  void* data_void = static_cast<void*>(ctx);
+  recordAlloc(actual_nbytes, data_void, device_id);
+
+  auto data_ptr_result =
+      at::DataPtr(data_void, ctx_void, &ReportAndDelete, curr_device);
+
+  return data_ptr_result;
+}
+
+c10::DataPtr SpyreAllocator::allocate(
+    size_t nbytes, const flex::AllocationDirective& directive) {
+  c10::Device curr_device =
+      c10::impl::getDeviceGuardImpl(c10::DeviceType::PrivateUse1)->getDevice();
+
+  auto device_id = curr_device.index();
+
+  DEBUGINFO("allocating ", nbytes, " (bytes) on Spyre", curr_device);
+  if (nbytes == 0) {
+    return {nullptr, nullptr, &ReportAndDelete, curr_device};
+  }
+  // Get shared_ptr to keep FlexAllocator alive during operations
+  auto flex_alloc = getFlexAllocator();
+
+  // Allocate first-class raw storage via CompositeAddress.
+  flex::CompositeAddress composite_addr =
+      flex_alloc->allocate(nbytes, directive);
 
   // FlexAllocator rounds up to DEVICE_ALIGNMENT (128 bytes), so the actual
   // allocation may be larger than the requested nbytes. Use total_size() for
