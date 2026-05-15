@@ -3028,8 +3028,8 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             },
         },
-        ("test_where_scalarout", "test_where_scalar"): {
-            "ops_dict": {"where": torch.where.Scalar},
+        ("test_where_self_out", "test_where_self_out"): {
+            "ops_dict": {"where": torch.where.self_out},
             "param_sets": {
                 "fp16_2d": (
                     cached_randn((10, 10), dtype=torch.float16) > 1,
@@ -3713,6 +3713,10 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     def test_where_eager(self, op, condition, x, y):
         self.compare_with_cpu(
             lambda condition, x, y: op(condition, x, y), condition, x, y)
+
+    def test_where_eager_selfout(self, op, condition, x, y, z):
+        self.compare_with_cpu(
+            lambda condition, x, y, z: op(condition, x, y), condition, x, y, z)
 
     def test_attn_qkv_paths(self, q, k, v):
         # This tests the dataflows between rope/qkv projection and SDPA for q, k, and v
