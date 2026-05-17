@@ -2969,7 +2969,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             ],
         },
         ("test_where_self", "test_where_eager"): {
-            "ops_dict": {"where": torch.where.self},
+            "ops_dict": {"where": torch.where},
             "param_sets": {
                 "fp16_2d": (
                     cached_randn((10, 10), dtype=torch.float16) > 1,
@@ -2984,7 +2984,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             },
         },
         ("test_where_scalarother", "test_where_eager"): {
-            "ops_dict": {"where": torch.where.ScalarOther},
+            "ops_dict": {"where": torch.where},
             "param_sets": {
                 "fp16_2d": (
                     cached_randn((10, 10), dtype=torch.float16) > 1,
@@ -3014,7 +3014,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             },
         },
         ("test_where_scalar", "test_where_scalar"): {
-            "ops_dict": {"where": torch.where.Scalar},
+            "ops_dict": {"where": torch.where},
             "param_sets": {
                 "fp16_2d": (
                     cached_randn((10, 10), dtype=torch.float16) > 1,
@@ -3029,7 +3029,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             },
         },
         ("test_where_self_out", "test_where_self_out"): {
-            "ops_dict": {"where": torch.where.self_out},
+            "ops_dict": {"where": torch.where},
             "param_sets": {
                 "fp16_2d": (
                     cached_randn((10, 10), dtype=torch.float16) > 1,
