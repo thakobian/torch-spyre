@@ -2999,7 +2999,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             },
         },
         ("test_where_scalarself", "test_where_scalarself"): {
-            "ops_dict": {"where": torch.where.ScalarSelf},
+            "ops_dict": {"where": torch.where},
             "param_sets": {
                 "fp16_2d": (
                     cached_randn((10, 10), dtype=torch.float16) > 1,
