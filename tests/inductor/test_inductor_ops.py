@@ -3028,7 +3028,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             },
         },
-        ("test_where_self_out", "test_where_self_out"): {
+        ("test_where_self_out", "test_where_eager_selfout"): {
             "ops_dict": {"where": torch.where},
             "param_sets": {
                 "fp16_2d": (
