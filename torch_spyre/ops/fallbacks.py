@@ -330,6 +330,7 @@ def spyre__bitwise_or(input1, input2, **kwargs):
 def spyre__argmax(*args, **kwargs):
     return torch.argmax(*args, **kwargs)
 
+
 @register_fallback([aten.where.default])
 def spyre__where(*args, **kwargs):
     return torch.where(*args, **kwargs)

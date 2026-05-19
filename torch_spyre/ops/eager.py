@@ -115,7 +115,7 @@ register_torch_compile_kernel(
         aten.where.ScalarOther,
         aten.where.ScalarSelf,
         aten.where.Scalar,
-        aten.where.self_out
+        aten.where.self_out,
     ]
 )
 
