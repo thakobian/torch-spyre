@@ -17,7 +17,6 @@
 #include "spyre_kernel.h"
 
 #include <c10/util/Exception.h>
-#include <flex/flex.hpp>
 
 #include <filesystem>  // NOLINT(build/c++17)
 #include <fstream>
