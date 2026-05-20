@@ -516,6 +516,10 @@ class SpyreKernel(Kernel[CSEVariable]):
             args.append(self.create_tensor_arg(False, real_dst_name, dst))
             op_info.update(value.op_info)
             self.op_specs.append(self.create_op_spec(value.op, False, args, op_info))
+        elif isinstance(value, Constant):
+            args = [self.create_tensor_arg(False, real_dst_name, dst)]
+            op_info["value"] = value.value
+            self.op_specs.append(self.create_op_spec("fill", False, args, op_info))
         elif isinstance(value, TensorAccess):
             # Reshapes, transposes, and other dataops
             args = [
