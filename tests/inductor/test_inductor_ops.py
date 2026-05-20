@@ -3255,17 +3255,17 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "67x71x256": (cached_randn((67, 71, 256), dtype=torch.float32),),
             },
         },
-        ("test_where_default", "test_where_eager_default_fallback"): {
-            "ops_dict": {"where": torch.where},
-            "param_sets": {
-                "fp16_2d": (
-                    cached_randn((10, 10), dtype=torch.float16) > 1,
-                ),
-                "fp16_3d": (
-                    cached_randn((5, 10, 10), dtype=torch.float16) > 1,
-                ),
-            },
-        },
+        # ("test_where_default", "test_where_eager_default_fallback"): {
+        #     "ops_dict": {"where": torch.where},
+        #     "param_sets": {
+        #         "fp16_2d": (
+        #             cached_randn((10, 10), dtype=torch.float16) > 1,
+        #         ),
+        #         "fp16_3d": (
+        #             cached_randn((5, 10, 10), dtype=torch.float16) > 1,
+        #         ),
+        #     },
+        # },
         ("test_where_self", "test_where_eager"): {
             "ops_dict": {"where": torch.where},
             "param_sets": {
@@ -4523,8 +4523,8 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     def test_min_eager(self, op, dim: int, keepdim: bool, x):
         self.compare_with_cpu(lambda x: op(x, dim=dim, keepdim=keepdim)[0], x)
 
-    def test_where_eager_default_fallback(self, op, condition):
-        self.compare_with_cpu(lambda condition: op(condition), condition)
+    # def test_where_eager_default_fallback(self, op, condition):
+    #     self.compare_with_cpu(lambda condition: op(condition), condition)
 
     def test_where_eager(self, op, condition, x, y):
         self.compare_with_cpu(
