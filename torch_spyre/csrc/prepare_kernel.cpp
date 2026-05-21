@@ -392,9 +392,8 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateCommand(
 /**
  * @brief Validate step ordering rules in the JobPlan
  *
- * Enforces the following rules:
- * 1. HostCompute→H2D→Compute sequence must be maintained
- * 2. ComputeOnDevice steps must have populated CompositeAddress
+ * Enforces the following rule:
+ * - HostCompute→H2D→Compute sequence must be maintained
  *
  * @param steps Vector of JobPlanStep pointers to validate
  * @throws TORCH_CHECK if validation fails
@@ -416,7 +415,6 @@ static void validateStepOrdering(
     bool is_host_compute =
         dynamic_cast<const JobPlanStepHostCompute*>(step.get()) != nullptr;
     bool is_h2d = dynamic_cast<const JobPlanStepH2D*>(step.get()) != nullptr;
-    bool is_d2h = dynamic_cast<const JobPlanStepD2H*>(step.get()) != nullptr;
     bool is_compute =
         dynamic_cast<const JobPlanStepCompute*>(step.get()) != nullptr;
 
@@ -426,16 +424,8 @@ static void validateStepOrdering(
         if (is_host_compute) {
           // HostCompute must be followed by H2D
           expected = ExpectedStep::H2D;
-        } else if (is_compute) {
-          // Validate ComputeOnDevice has populated CompositeAddress
-          const auto* compute_step =
-              dynamic_cast<const JobPlanStepCompute*>(step.get());
-          TORCH_CHECK(compute_step != nullptr,
-                      "Internal error: failed to cast to JobPlanStepCompute");
-          // CompositeAddress is always populated in JobPlanStepCompute
-          // constructor, so we just verify the step exists
         }
-        // H2D and D2H are allowed in Any state
+        // H2D, D2H, and Compute are allowed in Any state
         break;
 
       case ExpectedStep::H2D:
@@ -451,11 +441,6 @@ static void validateStepOrdering(
                     "Step ordering violation at step ", i,
                     ": H2D transfer after HostCompute must be followed by "
                     "Compute");
-        // Validate ComputeOnDevice has populated CompositeAddress
-        const auto* compute_step =
-            dynamic_cast<const JobPlanStepCompute*>(step.get());
-        TORCH_CHECK(compute_step != nullptr,
-                    "Internal error: failed to cast to JobPlanStepCompute");
         // Reset to Any state after completing the sequence
         expected = ExpectedStep::Any;
         break;
