@@ -393,7 +393,7 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateCommand(
  * @brief Validate step ordering rules in the JobPlan
  *
  * Enforces the following rule:
- * - HostCompute→H2D→Compute sequence must be maintained
+ * - HostCallback→H2D→Compute sequence must be maintained
  *
  * @param steps Vector of JobPlanStep pointers to validate
  * @throws TORCH_CHECK if validation fails
@@ -401,18 +401,18 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateCommand(
 static void validateStepOrdering(
     const std::vector<std::unique_ptr<JobPlanStep>>& steps) {
   enum class ExpectedStep {
-    Any,           // Any step is allowed
-    H2D,           // Expecting H2D after HostCompute
+    HostCallback,  // Expecting HostCallback as first step
+    H2D,           // Expecting H2D after HostCallback
     Compute,       // Expecting Compute after H2D
   };
 
-  ExpectedStep expected = ExpectedStep::Any;
+  ExpectedStep expected = ExpectedStep::HostCallback;
 
   for (size_t i = 0; i < steps.size(); ++i) {
     const auto& step = steps[i];
 
     // Check step type using dynamic_cast
-    bool is_host_compute =
+    bool is_host_callback =
         dynamic_cast<const JobPlanStepHostCompute*>(step.get()) != nullptr;
     bool is_h2d = dynamic_cast<const JobPlanStepH2D*>(step.get()) != nullptr;
     bool is_compute =
@@ -420,18 +420,18 @@ static void validateStepOrdering(
 
     // Validate based on expected state
     switch (expected) {
-      case ExpectedStep::Any:
-        if (is_host_compute) {
-          // HostCompute must be followed by H2D
-          expected = ExpectedStep::H2D;
-        }
-        // H2D, D2H, and Compute are allowed in Any state
+      case ExpectedStep::HostCallback:
+        TORCH_CHECK(is_host_callback,
+                    "Step ordering violation at step ", i,
+                    ": First step must be HostCallback");
+        // HostCallback must be followed by H2D
+        expected = ExpectedStep::H2D;
         break;
 
       case ExpectedStep::H2D:
         TORCH_CHECK(is_h2d,
                     "Step ordering violation at step ", i,
-                    ": HostCompute must be followed by H2D transfer");
+                    ": HostCallback must be followed by H2D transfer");
         // H2D must be followed by Compute
         expected = ExpectedStep::Compute;
         break;
@@ -439,18 +439,13 @@ static void validateStepOrdering(
       case ExpectedStep::Compute:
         TORCH_CHECK(is_compute,
                     "Step ordering violation at step ", i,
-                    ": H2D transfer after HostCompute must be followed by "
-                    "Compute");
-        // Reset to Any state after completing the sequence
-        expected = ExpectedStep::Any;
+                    ": H2D transfer must be followed by Compute");
+        // Sequence complete - no more steps expected
+        TORCH_CHECK(i == steps.size() - 1,
+                    "Step ordering violation: Compute must be the final step");
         break;
     }
   }
-
-  // Ensure we're not left in an incomplete sequence
-  TORCH_CHECK(expected == ExpectedStep::Any,
-              "Incomplete step sequence: HostCompute→H2D→Compute sequence not "
-              "completed");
 }
 
 std::unique_ptr<JobPlan> JobPlanBuilder::translateJobExecPlan() {
