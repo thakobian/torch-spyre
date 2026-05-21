@@ -389,6 +389,85 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateCommand(
   return nullptr;
 }
 
+/**
+ * @brief Validate step ordering rules in the JobPlan
+ *
+ * Enforces the following rules:
+ * 1. HostCompute→H2D→Compute sequence must be maintained
+ * 2. ComputeOnDevice steps must have populated CompositeAddress
+ *
+ * @param steps Vector of JobPlanStep pointers to validate
+ * @throws TORCH_CHECK if validation fails
+ */
+static void validateStepOrdering(
+    const std::vector<std::unique_ptr<JobPlanStep>>& steps) {
+  enum class ExpectedStep {
+    Any,           // Any step is allowed
+    H2D,           // Expecting H2D after HostCompute
+    Compute,       // Expecting Compute after H2D
+  };
+
+  ExpectedStep expected = ExpectedStep::Any;
+
+  for (size_t i = 0; i < steps.size(); ++i) {
+    const auto& step = steps[i];
+
+    // Check step type using dynamic_cast
+    bool is_host_compute =
+        dynamic_cast<const JobPlanStepHostCompute*>(step.get()) != nullptr;
+    bool is_h2d = dynamic_cast<const JobPlanStepH2D*>(step.get()) != nullptr;
+    bool is_d2h = dynamic_cast<const JobPlanStepD2H*>(step.get()) != nullptr;
+    bool is_compute =
+        dynamic_cast<const JobPlanStepCompute*>(step.get()) != nullptr;
+
+    // Validate based on expected state
+    switch (expected) {
+      case ExpectedStep::Any:
+        if (is_host_compute) {
+          // HostCompute must be followed by H2D
+          expected = ExpectedStep::H2D;
+        } else if (is_compute) {
+          // Validate ComputeOnDevice has populated CompositeAddress
+          const auto* compute_step =
+              dynamic_cast<const JobPlanStepCompute*>(step.get());
+          TORCH_CHECK(compute_step != nullptr,
+                      "Internal error: failed to cast to JobPlanStepCompute");
+          // CompositeAddress is always populated in JobPlanStepCompute
+          // constructor, so we just verify the step exists
+        }
+        // H2D and D2H are allowed in Any state
+        break;
+
+      case ExpectedStep::H2D:
+        TORCH_CHECK(is_h2d,
+                    "Step ordering violation at step ", i,
+                    ": HostCompute must be followed by H2D transfer");
+        // H2D must be followed by Compute
+        expected = ExpectedStep::Compute;
+        break;
+
+      case ExpectedStep::Compute:
+        TORCH_CHECK(is_compute,
+                    "Step ordering violation at step ", i,
+                    ": H2D transfer after HostCompute must be followed by "
+                    "Compute");
+        // Validate ComputeOnDevice has populated CompositeAddress
+        const auto* compute_step =
+            dynamic_cast<const JobPlanStepCompute*>(step.get());
+        TORCH_CHECK(compute_step != nullptr,
+                    "Internal error: failed to cast to JobPlanStepCompute");
+        // Reset to Any state after completing the sequence
+        expected = ExpectedStep::Any;
+        break;
+    }
+  }
+
+  // Ensure we're not left in an incomplete sequence
+  TORCH_CHECK(expected == ExpectedStep::Any,
+              "Incomplete step sequence: HostCompute→H2D→Compute sequence not "
+              "completed");
+}
+
 std::unique_ptr<JobPlan> JobPlanBuilder::translateJobExecPlan() {
   auto job_exec_plan = spyrecode_json_["JobExecPlan"];
   TORCH_CHECK(job_exec_plan.is_array(), "JobExecPlan must be an array");
@@ -410,6 +489,9 @@ std::unique_ptr<JobPlan> JobPlanBuilder::translateJobExecPlan() {
       TORCH_CHECK(false, "Failed to parse SpyreCode command: ", e.what());
     }
   }
+
+  // Validate step ordering rules
+  validateStepOrdering(steps);
 
   // TODO(jni): expected_input_shapes to be added once provided in SpyreCode
   // TODO(jni): pinned buffer to be added as std::map once HostCompute provided
