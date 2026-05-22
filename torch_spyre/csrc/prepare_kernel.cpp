@@ -266,6 +266,9 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnDevice(
 
   auto job_bin_addr =
       compute_offset_address(job_allocation_.value(), job_bin_ptr);
+  TORCH_CHECK(job_bin_addr.total_size() > 0,
+              "ComputeOnDevice binary address must be populated (size > 0)");
+
   // Create RuntimeOperationCompute with the allocated program address
   return std::make_unique<JobPlanStepCompute>(std::move(job_bin_addr),
                                               bind_io_addresses_);
@@ -440,6 +443,7 @@ static void validateStepOrdering(
         TORCH_CHECK(is_compute,
                     "Step ordering violation at step ", i,
                     ": H2D transfer must be followed by Compute");
+
         // Sequence complete - no more steps expected
         TORCH_CHECK(i == steps.size() - 1,
                     "Step ordering violation: Compute must be the final step");
@@ -470,7 +474,8 @@ std::unique_ptr<JobPlan> JobPlanBuilder::translateJobExecPlan() {
     }
   }
 
-  // Validate step ordering rules
+  // Validate step ordering rules and if compute step has composite_address
+  // populated
   validateStepOrdering(steps);
 
   // TODO(jni): expected_input_shapes to be added once provided in SpyreCode
