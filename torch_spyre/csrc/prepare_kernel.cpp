@@ -266,6 +266,8 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnDevice(
 
   auto job_bin_addr =
       compute_offset_address(job_allocation_.value(), job_bin_ptr);
+
+  // Verify the resulting binary address is populated
   TORCH_CHECK(job_bin_addr.total_size() > 0,
               "ComputeOnDevice binary address must be populated (size > 0)");
 
