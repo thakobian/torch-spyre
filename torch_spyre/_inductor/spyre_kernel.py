@@ -284,6 +284,12 @@ class SpyreOpFuncs:
 
     @staticmethod
     def where(x, y, z):
+        if isinstance(y, Constant):
+            op_info = {"constants": {"scalar": y.value}}
+            return PointwiseOp("where3", [x, z], op_info)
+        if isinstance(z, Constant):
+            op_info = {"constants": {"scalar": z.value}}
+            return PointwiseOp("where3", [x, y], op_info)
         return PointwiseOp("where3", [x, y, z])
 
 
