@@ -432,6 +432,7 @@ def convert_constant_with_graph_node(graph: torch.fx.Graph) -> None:
         torch.ops.aten.mul.Tensor,
         torch.ops.aten.true_divide.Tensor,
         torch.ops.aten.div.Tensor,
+        torch.ops.aten.where.Tensor,
     ]
 
     for node in graph.nodes:

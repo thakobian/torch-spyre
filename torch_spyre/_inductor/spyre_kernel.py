@@ -292,11 +292,6 @@ class SpyreOpFuncs:
 
     @staticmethod
     def where(x, y, z):
-        # Convert scalar constants to tensors
-        if isinstance(y, Constant):
-            y = torch.tensor(y.value, dtype=y.dtype)
-        if isinstance(z, Constant):
-            z = torch.tensor(z.value, dtype=z.dtype)
         return PointwiseOp("where3", [x, y, z])
 
 
