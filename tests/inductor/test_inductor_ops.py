@@ -397,7 +397,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 [
                     ((256,), (67, 256)),
                 ]
-            )
+            ),
         },
         ("test_addmm", "test_addmm_cpu"): {
             "param_sets": make_param_dict(
@@ -3678,6 +3678,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     cached_randn((5, 10, 10), dtype=torch.float16),
                 ),
             },
+        },
         ("test_to_dtype_op_map", "test_to_dtype_op_map"): {
             "param_sets": TO_DTYPE_OP_MAP_PARAMS_SETS,
         },
