@@ -117,9 +117,6 @@ register_torch_compile_kernel(
         aten.pow,
         aten.linalg_vector_norm,
         aten.where.self,
-        aten.where.ScalarOther,
-        aten.where.ScalarSelf,
-        aten.where.Scalar,
         aten.where.self_out,
         aten.clamp,
         aten.constant_pad_nd,
@@ -172,6 +169,28 @@ def spyre__uniform_(self, from_=0.0, to=1.0, generator=None):
     self.copy_(cpu_tmp)
 
     return self
+
+
+@torch.library.register_kernel("aten::where.ScalarOther", ["spyre"])  # type:ignore
+def spyre__where_scalar_other(condition: torch.Tensor, self: torch.Tensor, other):
+    other_tensor = torch.full_like(self, other)
+    return torch.where(condition, self, other_tensor)
+
+
+@torch.library.register_kernel("aten::where.ScalarSelf", ["spyre"])  # type:ignore
+def spyre__where_scalar_self(condition: torch.Tensor, self, other: torch.Tensor):
+    self_tensor = torch.full_like(other, self)
+    return torch.where(condition, self_tensor, other)
+
+
+@torch.library.register_kernel("aten::where.Scalar", ["spyre"])  # type:ignore
+def spyre__where_scalar(condition: torch.Tensor, self, other):
+    dtype = torch.get_default_dtype()
+    if condition.dtype == torch.bool:
+        dtype = torch.float32
+    self_tensor = torch.full(condition.size(), self, dtype=dtype, device=condition.device)
+    other_tensor = torch.full(condition.size(), other, dtype=dtype, device=condition.device)
+    return torch.where(condition, self_tensor, other_tensor)
 
 
 @torch.library.register_kernel("aten::_local_scalar_dense", "spyre")

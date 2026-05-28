@@ -292,14 +292,7 @@ class SpyreOpFuncs:
 
     @staticmethod
     def where(x, y, z):
-        op_info = {"constants": {}}
-        if isinstance(y, Constant):
-            op_info["constants"]["whereY"] = y.value
-        if isinstance(z, Constant):
-            op_info["constants"]["whereZ"] = z.value
-        if not op_info["constants"]:
-            op_info = {}
-        return PointwiseOp("where3", [x, y, z], op_info)
+        return PointwiseOp("where3", [x, y, z])
 
 
 class SpyreKernelOpsHandler(DefaultHandler):
