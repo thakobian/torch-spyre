@@ -321,7 +321,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 [
                     ((256,), (67, 256)),
                 ]
-            )
+            ),
         },
         ("test_add_broadcast_cpu", "test_add_broadcast_cpu"): {
             "param_sets": make_param_dict(
