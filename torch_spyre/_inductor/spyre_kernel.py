@@ -296,7 +296,7 @@ class SpyreOpFuncs:
         if isinstance(y, Constant):
             y = V.ops.full([], y.value, dtype=y.dtype)
         if isinstance(z, Constant):
-            zz = V.ops.full([], z.value, dtype=z.dtype)
+            z = V.ops.full([], z.value, dtype=z.dtype)
         return PointwiseOp("where3", [x, y, z])
 
 
