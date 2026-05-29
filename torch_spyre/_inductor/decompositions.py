@@ -691,6 +691,37 @@ def sub_with_alpha(
         scaled_other = torch.mul(other, alpha)
         return torch.sub(self, scaled_other)
 
+@register_spyre_decomposition([torch.ops.aten.where.ScalarOther])
+def where_scalar_other_decomp(condition, self, other):
+    other_t = torch.full_like(self, other)
+    return torch.ops.aten.where.self(condition, self, other_t)
+
+
+@register_spyre_decomposition([torch.ops.aten.where.ScalarSelf])
+def where_scalar_self_decomp(condition, self, other):
+    self_t = torch.full_like(other, self)
+    return torch.ops.aten.where.self(condition, self_t, other)
+
+
+@register_spyre_decomposition([torch.ops.aten.where.Scalar])
+def where_scalar_decomp(condition, self, other):
+    # Pick dtype carefully if needed; this is the simple version.
+    dtype = torch.get_default_dtype()
+
+    self_t = torch.ops.aten.full.default(
+        list(condition.shape),
+        self,
+        dtype=dtype,
+        device=condition.device,
+    )
+    other_t = torch.ops.aten.full.default(
+        list(condition.shape),
+        other,
+        dtype=dtype,
+        device=condition.device,
+    )
+
+    return torch.ops.aten.where.self(condition, self_t, other_t)
 
 ###############################################################################################
 ##                           Register custom kernels for Spyre.                              ##
