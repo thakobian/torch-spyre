@@ -705,21 +705,9 @@ def where_scalar_self_decomp(condition, self, other):
 
 @register_spyre_decomposition([torch.ops.aten.where.Scalar])
 def where_scalar_decomp(condition, self, other):
-    dtype = condition.dtype
 
-
-    self_t = torch.ops.aten.full.default(
-        list(condition.shape),
-        self,
-        dtype=dtype,
-        device=condition.device,
-    )
-    other_t = torch.ops.aten.full.default(
-        list(condition.shape),
-        other,
-        dtype=dtype,
-        device=condition.device,
-    )
+    self_t = torch.full_like(condition, other)
+    other_t = torch.full_like(condition, self)
 
     return torch.ops.aten.where.self(condition, self_t, other_t)
 
