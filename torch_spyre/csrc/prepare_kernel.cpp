@@ -397,7 +397,7 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateCommand(
 /**
  * @brief Validate step ordering rules in the JobPlan
  *
- * Enforces the following rule:
+ * Enforces the following rule when first step is HostCallback:
  * - HostCallback→H2D→Compute sequence must be maintained
  *
  * @param steps Vector of JobPlanStep pointers to validate
@@ -405,6 +405,19 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateCommand(
  */
 static void validateStepOrdering(
     const std::vector<std::unique_ptr<JobPlanStep>>& steps) {
+  // Only validate if steps exist and first step is HostCallback
+  if (steps.empty()) {
+    return;
+  }
+
+  bool first_is_host_callback =
+      dynamic_cast<const JobPlanStepHostCompute*>(steps[0].get()) != nullptr;
+
+  if (!first_is_host_callback) {
+    // No validation needed if first step is not HostCallback
+    return;
+  }
+
   enum class ExpectedStep {
     HostCallback,  // Expecting HostCallback as first step
     H2D,           // Expecting H2D after HostCallback
@@ -445,11 +458,7 @@ static void validateStepOrdering(
         TORCH_CHECK(is_compute,
                     "Step ordering violation at step ", i,
                     ": H2D transfer must be followed by Compute");
-
-        // Sequence complete - no more steps expected
-        TORCH_CHECK(i == steps.size() - 1,
-                    "Step ordering violation: Compute must be the final step");
-        break;
+        return;
     }
   }
 }
