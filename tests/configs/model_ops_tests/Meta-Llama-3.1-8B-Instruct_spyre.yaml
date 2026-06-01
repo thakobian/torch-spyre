@@ -1056,8 +1056,8 @@ test_suite_config:
                 - name: torch.getitem
                   sample_inputs_func:
                     args:
-                      - tensor:
-                          shape: [1, 12, 4096]
+                      - tensor: null
+                     shape: [1, 12, 4096]
                           stride: [49152, 4096, 1]
                           storage_offset: 0
                           dtype: torch.float16

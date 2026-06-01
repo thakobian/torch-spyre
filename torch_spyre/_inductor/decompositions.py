@@ -691,6 +691,7 @@ def sub_with_alpha(
         scaled_other = torch.mul(other, alpha)
         return torch.sub(self, scaled_other)
 
+
 @register_spyre_decomposition([torch.ops.aten.where.ScalarOther])
 def where_scalar_other_decomp(condition, self, other):
     other_t = torch.full_like(self, other)
@@ -723,6 +724,7 @@ def where_scalar_decomp(condition, self, other):
     )
 
     return torch.ops.aten.where.self(condition, self_t, other_t)
+
 
 ###############################################################################################
 ##                           Register custom kernels for Spyre.                              ##

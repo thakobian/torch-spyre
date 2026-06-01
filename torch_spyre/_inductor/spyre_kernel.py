@@ -785,4 +785,3 @@ def simplify_op_spec(op_spec):
     for arg, t in zip(op_spec.args, new_tensors):
         arg.device_size = t["size"]
         arg.device_coordinates = t["coordinates"]
-
