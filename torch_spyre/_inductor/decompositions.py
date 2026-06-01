@@ -712,13 +712,13 @@ def where_scalar_decomp(condition, self, other):
     self_t = torch.ops.aten.full.default(
         list(condition.shape),
         self,
-        dtype=dtype,
+        dtype=torch.float16,
         device=condition.device,
     )
     other_t = torch.ops.aten.full.default(
         list(condition.shape),
         other,
-        dtype=dtype,
+        dtype=torch.float16,
         device=condition.device,
     )
 
