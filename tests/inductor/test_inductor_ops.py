@@ -3651,12 +3651,12 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             "ops_dict": {"where": torch.where},
             "param_sets": {
                 "fp16_2d": (
-                    cached_randn((10, 10), dtype=torch.float16) > 1,
+                    cached_randn((10, 10), dtype=torch.float32) > 1,
                     0.0,
                     0.0,
                 ),
                 "fp16_3d": (
-                    cached_randn((5, 10, 10), dtype=torch.float16) > 1,
+                    cached_randn((5, 10, 10), dtype=torch.float32) > 1,
                     0.0,
                     0.0,
                 ),
