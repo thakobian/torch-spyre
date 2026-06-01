@@ -693,20 +693,23 @@ def sub_with_alpha(
 
 @register_spyre_decomposition([torch.ops.aten.where.ScalarOther])
 def where_scalar_other_decomp(condition, self, other):
-    other_t = torch.full_like(self, other)
-    return torch.ops.aten.where.self(condition, self, other_t)
+    dtype = torch.result_type(self, other)
+    self_t = self.to(dtype=dtype) if self.dtype != dtype else self
+    other_t = torch.full_like(self_t, other, dtype=dtype)
+    return torch.ops.aten.where.self(condition, self_t, other_t)
 
 
 @register_spyre_decomposition([torch.ops.aten.where.ScalarSelf])
 def where_scalar_self_decomp(condition, self, other):
-    self_t = torch.full_like(other, self)
-    return torch.ops.aten.where.self(condition, self_t, other)
+    dtype = torch.result_type(self, other)
+    other_t = other.to(dtype=dtype) if other.dtype != dtype else other
+    self_t = torch.full_like(other_t, self, dtype=dtype)
+    return torch.ops.aten.where.self(condition, self_t, other_t)
 
 
 @register_spyre_decomposition([torch.ops.aten.where.Scalar])
 def where_scalar_decomp(condition, self, other):
-    # Pick dtype carefully if needed; this is the simple version.
-    dtype = torch.get_default_dtype()
+    dtype = torch.result_type(self, other)
 
     self_t = torch.ops.aten.full.default(
         list(condition.shape),
