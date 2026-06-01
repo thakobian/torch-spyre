@@ -707,6 +707,16 @@ def where_scalar_self_decomp(condition, self, other):
 def where_scalar_decomp(condition, self, other):
     dtype = torch.result_type(self, other)
 
+    # Avoid emitting an integer where3 bundle for cases like torch.where(cond, 0, 0).
+    # The condition is irrelevant when both scalar branches are identical.
+    if self == other:
+        return torch.ops.aten.full.default(
+            list(condition.shape),
+            self,
+            dtype=dtype,
+            device=condition.device,
+        )
+
     self_t = torch.ops.aten.full.default(
         list(condition.shape),
         self,
