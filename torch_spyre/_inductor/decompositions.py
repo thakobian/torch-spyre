@@ -705,9 +705,15 @@ def where_scalar_self_decomp(condition, self, other):
 
 @register_spyre_decomposition([torch.ops.aten.where.Scalar])
 def where_scalar_decomp(condition, self, other):
+    dtype = torch.result_type(self, other)
 
-    self_t = torch.full_like(condition, other)
-    other_t = torch.full_like(condition, self)
+    # If both scalars are integers (resulting in int64), use float16 instead
+    # to match typical usage patterns and avoid backend issues
+    if dtype == torch.int64:
+        dtype = torch.float16
+
+    self_t = torch.full_like(condition, self, dtype=dtype)
+    other_t = torch.full_like(condition, other, dtype=dtype)
 
     return torch.ops.aten.where.self(condition, self_t, other_t)
 
