@@ -3647,7 +3647,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             },
         },
-        ("test_where_scalar", "test_where_eager"): {
+        ("test_where_scalar", "test_where_eager_scalar"): {
             "ops_dict": {"where": torch.where},
             "param_sets": {
                 "fp16_2d": (
