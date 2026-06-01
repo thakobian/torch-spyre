@@ -4949,6 +4949,13 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             lambda condition, x, y: op(condition, x, y), condition, x, y
         )
 
+    def test_where_eager_scalar(self, op, condition, x, y):
+        x = torch.tensor(x, dtype=torch.float16)
+        y = torch.tensor(y, dtype=torch.float16)
+        self.compare_with_cpu(
+            lambda condition, x, y: op(condition, x, y), condition, x, y
+        )
+
     def test_where_eager_selfout(self, op, condition, x, y, z):
         self.compare_with_cpu(
             lambda condition, x, y, z: op(condition, x, y, out=z), condition, x, y, z
