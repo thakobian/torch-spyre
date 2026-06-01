@@ -705,11 +705,10 @@ def where_scalar_self_decomp(condition, self, other):
 
 @register_spyre_decomposition([torch.ops.aten.where.Scalar])
 def where_scalar_decomp(condition, self, other):
-    # Infer the result dtype based on scalar types
+    # dtype must be float16 to work with spyre backend
     dtype = torch.float16
 
     # Use full.default instead of full_like to explicitly control dtype
-    # and avoid inheriting bool dtype from condition tensor
     self_t = torch.ops.aten.full.default(
         list(condition.shape),
         self,
