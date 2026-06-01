@@ -707,13 +707,20 @@ def where_scalar_self_decomp(condition, self, other):
 def where_scalar_decomp(condition, self, other):
     dtype = torch.result_type(self, other)
 
-    # If both scalars are integers (resulting in int64), use float16 instead
-    # to match typical usage patterns and avoid backend issues
-    if dtype == torch.int64:
-        dtype = torch.float16
-
-    self_t = torch.full_like(condition, self, dtype=dtype)
-    other_t = torch.full_like(condition, other, dtype=dtype)
+    # Use full.default instead of full_like to explicitly control dtype
+    # and avoid inheriting bool dtype from condition tensor
+    self_t = torch.ops.aten.full.default(
+        list(condition.shape),
+        self,
+        dtype=dtype,
+        device=condition.device,
+    )
+    other_t = torch.ops.aten.full.default(
+        list(condition.shape),
+        other,
+        dtype=dtype,
+        device=condition.device,
+    )
 
     return torch.ops.aten.where.self(condition, self_t, other_t)
 
