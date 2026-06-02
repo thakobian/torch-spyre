@@ -1831,8 +1831,7 @@ cases:
       cache_position, value_states)'
     marks: constant
   - name: torch.nn.functional.scaled_dot_product_attention.2_spyre
-    op: torch.nn.functional.scaled_dot_product_
-ttention
+    op: torch.nn.functional.scaled_dot_product_attention
     inputs:
       - tensor:
           shape: [1, 32, 1, 128]
