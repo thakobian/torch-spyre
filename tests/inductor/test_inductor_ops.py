@@ -3627,6 +3627,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             "param_sets": {
                 "fp16_2d": (cached_randn((10, 10), dtype=torch.float16) > 1,),
                 "fp16_3d": (cached_randn((5, 10, 10), dtype=torch.float16) > 1,),
+                "fp16_broadcast": (cached_randn((10,), dtype=torch.float16) > 1,),
             },
         },
         ("test_where_self", "test_where_eager"): {
@@ -3642,6 +3643,11 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     cached_randn((5, 10, 10), dtype=torch.float16),
                     cached_randn((5, 10, 10), dtype=torch.float16),
                 ),
+                "fp16_broadcast": (
+                    cached_randn((10,), dtype=torch.float16) > 1,
+                    cached_randn((5, 10), dtype=torch.float16),
+                    cached_randn((5, 10), dtype=torch.float16),
+                ),
             },
         },
         ("test_where_scalarother", "test_where_eager"): {
@@ -3655,6 +3661,11 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "fp16_3d": (
                     cached_randn((5, 10, 10), dtype=torch.float16) > 1,
                     cached_randn((5, 10, 10), dtype=torch.float16),
+                    0,
+                ),
+                "fp16_broadcast": (
+                    cached_randn((10,), dtype=torch.float16) > 1,
+                    cached_randn((5, 10), dtype=torch.float16),
                     0,
                 ),
             },
@@ -3672,6 +3683,11 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     0,
                     cached_randn((5, 10, 10), dtype=torch.float16),
                 ),
+                "fp16_broadcast": (
+                    cached_randn((10,), dtype=torch.float16) > 1,
+                    0,
+                    cached_randn((5, 10), dtype=torch.float16),
+                ),
             },
         },
         ("test_where_scalar", "test_where_eager_scalar"): {
@@ -3684,6 +3700,11 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
                 "fp16_3d": (
                     cached_randn((5, 10, 10), dtype=torch.float16) > 1,
+                    0,
+                    0,
+                ),
+                "fp16_broadcast": (
+                    cached_randn((10,), dtype=torch.float16) > 1,
                     0,
                     0,
                 ),
@@ -3703,6 +3724,12 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     cached_randn((5, 10, 10), dtype=torch.float16),
                     cached_randn((5, 10, 10), dtype=torch.float16),
                     cached_randn((5, 10, 10), dtype=torch.float16),
+                ),
+                "fp16_broadcast": (
+                    cached_randn((10,), dtype=torch.float16) > 1,
+                    cached_randn((5, 10), dtype=torch.float16),
+                    cached_randn((5, 10), dtype=torch.float16),
+                    cached_randn((5, 10), dtype=torch.float16),
                 ),
             },
         },
