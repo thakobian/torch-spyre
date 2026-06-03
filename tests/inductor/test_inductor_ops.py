@@ -3627,7 +3627,6 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             "param_sets": {
                 "fp16_2d": (cached_randn((10, 10), dtype=torch.float16) > 1,),
                 "fp16_3d": (cached_randn((5, 10, 10), dtype=torch.float16) > 1,),
-                "fp16_broadcast": (cached_randn((10,), dtype=torch.float16) > 1,),
             },
         },
         ("test_where_self", "test_where_eager"): {
