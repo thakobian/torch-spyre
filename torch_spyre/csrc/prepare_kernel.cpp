@@ -456,75 +456,6 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateCommand(
   return nullptr;
 }
 
-/**
- * @brief Validate step ordering rules in the JobPlan
- *
- * Enforces the following rule when first step is HostCallback:
- * - HostCallback→H2D→Compute sequence must be maintained
- *
- * @param steps Vector of JobPlanStep pointers to validate
- * @throws TORCH_CHECK if validation fails
- */
-static void validateStepOrdering(
-    const std::vector<std::unique_ptr<JobPlanStep>>& steps) {
-  // Only validate if steps exist and first step is HostCallback
-  if (steps.empty()) {
-    return;
-  }
-
-  bool first_is_host_callback =
-      dynamic_cast<const JobPlanStepHostCompute*>(steps[0].get()) != nullptr;
-
-  if (!first_is_host_callback) {
-    // No validation needed if first step is not HostCallback
-    return;
-  }
-
-  enum class ExpectedStep {
-    HostCallback,  // Expecting HostCallback as first step
-    H2D,           // Expecting H2D after HostCallback
-    Compute,       // Expecting Compute after H2D
-  };
-
-  ExpectedStep expected = ExpectedStep::HostCallback;
-
-  for (size_t i = 0; i < steps.size(); ++i) {
-    const auto& step = steps[i];
-
-    // Check step type using dynamic_cast
-    bool is_host_callback =
-        dynamic_cast<const JobPlanStepHostCompute*>(step.get()) != nullptr;
-    bool is_h2d = dynamic_cast<const JobPlanStepH2D*>(step.get()) != nullptr;
-    bool is_compute =
-        dynamic_cast<const JobPlanStepCompute*>(step.get()) != nullptr;
-
-    // Validate based on expected state
-    switch (expected) {
-      case ExpectedStep::HostCallback:
-        TORCH_CHECK(is_host_callback,
-                    "Step ordering violation at step ", i,
-                    ": First step must be HostCallback");
-        // HostCallback must be followed by H2D
-        expected = ExpectedStep::H2D;
-        break;
-
-      case ExpectedStep::H2D:
-        TORCH_CHECK(is_h2d,
-                    "Step ordering violation at step ", i,
-                    ": HostCallback must be followed by H2D transfer");
-        // H2D must be followed by Compute
-        expected = ExpectedStep::Compute;
-        break;
-
-      case ExpectedStep::Compute:
-        TORCH_CHECK(is_compute,
-                    "Step ordering violation at step ", i,
-                    ": H2D transfer must be followed by Compute");
-        return;
-    }
-  }
-}
-
 std::unique_ptr<JobPlan> JobPlanBuilder::translateJobExecPlan() {
   auto job_exec_plan = spyrecode_json_["JobExecPlan"];
   TORCH_CHECK(job_exec_plan.is_array(), "JobExecPlan must be an array");
@@ -543,10 +474,6 @@ std::unique_ptr<JobPlan> JobPlanBuilder::translateJobExecPlan() {
       TORCH_CHECK(false, "Failed to parse SpyreCode command: ", e.what());
     }
   }
-
-  // Validate step ordering rules and if compute step has composite_address
-  // populated
-  validateStepOrdering(steps);
 
   // TODO(jni): expected_input_shapes to be added once provided in SpyreCode
   // Create pinned_buffers vector from pinned_buffer_map_
@@ -579,10 +506,58 @@ JobPlanBuilder::ValidationResult JobPlanBuilder::validate(
   // - Verify shape count matches number of input tensors
 
   // P2-14: JobPlan step ordering validation
-  // TODO(johngontaryk): Implement once step ordering rules are defined
-  // - Verify HostCompute steps precede their corresponding H2D steps
-  // - Verify H2D steps precede Compute steps that depend on them
-  // - Verify no circular dependencies in step ordering
+  // Enforces the following rule when first step is HostCallback:
+  // - HostCallback→H2D→Compute sequence must be maintained
+  if (!job_plan.steps.empty()) {
+    bool first_is_host_callback =
+        dynamic_cast<const JobPlanStepHostCompute*>(job_plan.steps[0].get()) != nullptr;
+
+    if (first_is_host_callback) {
+      enum class ExpectedStep {
+        HostCallback,  // Expecting HostCallback as first step
+        H2D,           // Expecting H2D after HostCallback
+        Compute,       // Expecting Compute after H2D
+      };
+
+      ExpectedStep expected = ExpectedStep::HostCallback;
+
+      for (size_t i = 0; i < job_plan.steps.size(); ++i) {
+        const auto& step = job_plan.steps[i];
+
+        // Check step type using dynamic_cast
+        bool is_host_callback =
+            dynamic_cast<const JobPlanStepHostCompute*>(step.get()) != nullptr;
+        bool is_h2d = dynamic_cast<const JobPlanStepH2D*>(step.get()) != nullptr;
+        bool is_compute =
+            dynamic_cast<const JobPlanStepCompute*>(step.get()) != nullptr;
+
+        // Validate based on expected state
+        switch (expected) {
+          case ExpectedStep::HostCallback:
+            TORCH_CHECK(is_host_callback,
+                        "Step ordering violation at step ", i,
+                        ": First step must be HostCallback");
+            // HostCallback must be followed by H2D
+            expected = ExpectedStep::H2D;
+            break;
+
+          case ExpectedStep::H2D:
+            TORCH_CHECK(is_h2d,
+                        "Step ordering violation at step ", i,
+                        ": HostCallback must be followed by H2D transfer");
+            // H2D must be followed by Compute
+            expected = ExpectedStep::Compute;
+            break;
+
+          case ExpectedStep::Compute:
+            TORCH_CHECK(is_compute,
+                        "Step ordering violation at step ", i,
+                        ": H2D transfer must be followed by Compute");
+            break;
+        }
+      }
+    }
+  }
 
   // P2-15: Host compute metadata validation
   // TODO(johngontaryk): Implement once host compute metadata structure is
