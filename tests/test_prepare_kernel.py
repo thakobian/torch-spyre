@@ -46,6 +46,27 @@ class TestPrepareKernel:
         spyrecode_dir = os.path.join(tmpdir, "spyreCodeDir")
         os.makedirs(spyrecode_dir, exist_ok=True)
 
+        # Create a minimal spyrecode.json
+        spyrecode_json = {
+            "JobPreparationPlan": [
+                {"command": "Allocate", "properties": {"size": "1024"}},
+                {
+                    "command": "InitTransfer",
+                    "properties": {
+                        "init_bin_file": "init_binary.bin",
+                        "dev_ptr": "120259084288",
+                        "size": "1024",
+                    },
+                },
+            ],
+            "JobExecPlan": [
+                {
+                    "command": "ComputeOnDevice",
+                    "properties": {"job_bin_ptr": "120259084288"},
+                }
+            ],
+        }
+
         # Write spyrecode.json
         with open(os.path.join(spyrecode_dir, "spyrecode.json"), "w") as f:
             json.dump(spyrecode_json, f, indent=2)
