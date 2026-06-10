@@ -514,33 +514,24 @@ JobPlanBuilder::ValidationResult JobPlanBuilder::validate(
 
     if (first_is_host_callback) {
       enum class ExpectedStep {
-        HostCallback,  // Expecting HostCallback as first step
-        H2D,           // Expecting H2D after HostCallback
-        Compute,       // Expecting Compute after H2D
+        H2D,      // Expecting H2D after HostCallback
+        Compute,  // Expecting Compute after H2D
       };
 
-      ExpectedStep expected = ExpectedStep::HostCallback;
+      // Step 0 is already verified as HostCallback; validate from step 1 onward
+      ExpectedStep expected = ExpectedStep::H2D;
+      bool sequence_complete = false;
 
-      for (size_t i = 0; i < job_plan.steps.size(); ++i) {
+      for (size_t i = 1; i < job_plan.steps.size(); ++i) {
         const auto& step = job_plan.steps[i];
 
         // Check step type using dynamic_cast
-        bool is_host_callback =
-            dynamic_cast<const JobPlanStepHostCompute*>(step.get()) != nullptr;
         bool is_h2d = dynamic_cast<const JobPlanStepH2D*>(step.get()) != nullptr;
         bool is_compute =
             dynamic_cast<const JobPlanStepCompute*>(step.get()) != nullptr;
 
         // Validate based on expected state
         switch (expected) {
-          case ExpectedStep::HostCallback:
-            TORCH_CHECK(is_host_callback,
-                        "Step ordering violation at step ", i,
-                        ": First step must be HostCallback");
-            // HostCallback must be followed by H2D
-            expected = ExpectedStep::H2D;
-            break;
-
           case ExpectedStep::H2D:
             TORCH_CHECK(is_h2d,
                         "Step ordering violation at step ", i,
@@ -553,9 +544,14 @@ JobPlanBuilder::ValidationResult JobPlanBuilder::validate(
             TORCH_CHECK(is_compute,
                         "Step ordering violation at step ", i,
                         ": H2D transfer must be followed by Compute");
+            sequence_complete = true;
             break;
         }
       }
+
+      TORCH_CHECK(sequence_complete,
+                  "Incomplete step sequence: HostCallback must be followed "
+                  "by H2D transfer and Compute");
     }
   }
 
