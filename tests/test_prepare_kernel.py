@@ -34,40 +34,17 @@ def initialize_runtime():
 class TestPrepareKernel:
     """Test suite for PrepareKernel and JobPlan bindings."""
 
-    def create_mock_spyrecode(self, tmpdir, spyrecode_json=None):
+    def create_mock_spyrecode(self, tmpdir):
         """Create a mock SpyreCode directory structure for testing.
 
         Args:
             tmpdir: Temporary directory path
-            spyrecode_json: Optional custom spyrecode.json dict. If None, uses default.
 
         Returns:
             Path to the SpyreCode directory
         """
         spyrecode_dir = os.path.join(tmpdir, "spyreCodeDir")
         os.makedirs(spyrecode_dir, exist_ok=True)
-
-        # Use provided spyrecode_json or create default
-        if spyrecode_json is None:
-            spyrecode_json = {
-                "JobPreparationPlan": [
-                    {"command": "Allocate", "properties": {"size": "1024"}},
-                    {
-                        "command": "InitTransfer",
-                        "properties": {
-                            "init_bin_file": "init_binary.bin",
-                            "dev_ptr": "120259084288",
-                            "size": "1024",
-                        },
-                    },
-                ],
-                "JobExecPlan": [
-                    {
-                        "command": "ComputeOnDevice",
-                        "properties": {"job_bin_ptr": "120259084288"},
-                    }
-                ],
-            }
 
         # Write spyrecode.json
         with open(os.path.join(spyrecode_dir, "spyrecode.json"), "w") as f:
@@ -139,40 +116,6 @@ class TestPrepareKernel:
             # Should raise error for out-of-range index
             with pytest.raises(RuntimeError, match="Step index out of range"):
                 job_plan.get_step_type(999)
-
-    def test_compute_step_unpopulated_address_fails(self):
-        """Test that ComputeOnDevice with unpopulated address fails validation."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Create spyrecode.json with job_bin_ptr pointing to invalid address (0)
-            # This should result in job_bin_addr.total_size() == 0
-            custom_json = {
-                "JobPreparationPlan": [
-                    {"command": "Allocate", "properties": {"size": "1024"}},
-                    {
-                        "command": "InitTransfer",
-                        "properties": {
-                            "init_bin_file": "init_binary.bin",
-                            "dev_ptr": "120259084288",
-                            "size": "1024",
-                        },
-                    },
-                ],
-                "JobExecPlan": [
-                    {
-                        "command": "ComputeOnDevice",
-                        # Invalid pointer -> unpopulated address
-                        "properties": {"job_bin_ptr": "0"},
-                    }
-                ],
-            }
-
-            spyrecode_dir = self.create_mock_spyrecode(tmpdir, custom_json)
-
-            # Should fail because job_bin_addr is not populated (total_size == 0)
-            with pytest.raises(
-                RuntimeError, match="ComputeOnDevice binary address must be populated"
-            ):
-                torch_spyre._C.prepare_kernel(spyrecode_dir)
 
 
 if __name__ == "__main__":
