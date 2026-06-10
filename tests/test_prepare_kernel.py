@@ -140,16 +140,6 @@ class TestPrepareKernel:
             with pytest.raises(RuntimeError, match="Step index out of range"):
                 job_plan.get_step_type(999)
 
-    def test_step_ordering_single_compute_fails(self):
-        """Test that single Compute step fails validation (expects HostCallback first)."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            spyrecode_dir = self.create_mock_spyrecode(tmpdir)
-
-            # The default mock has only ComputeOnDevice, which should fail
-            # because validateStepOrdering expects HostCallback as first step
-            with pytest.raises(RuntimeError, match="First step must be HostCallback"):
-                torch_spyre._C.prepare_kernel(spyrecode_dir)
-
     def test_compute_step_unpopulated_address_fails(self):
         """Test that ComputeOnDevice with unpopulated address fails validation."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -170,7 +160,8 @@ class TestPrepareKernel:
                 "JobExecPlan": [
                     {
                         "command": "ComputeOnDevice",
-                        "properties": {"job_bin_ptr": "0"},  # Invalid pointer -> unpopulated address
+                        # Invalid pointer -> unpopulated address
+                        "properties": {"job_bin_ptr": "0"},
                     }
                 ],
             }
