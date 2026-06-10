@@ -509,8 +509,8 @@ JobPlanBuilder::ValidationResult JobPlanBuilder::validate(
   // Enforces the following rule when first step is HostCallback:
   // - HostCallback→H2D→Compute sequence must be maintained
   if (!job_plan.steps.empty()) {
-    bool first_is_host_callback =
-        dynamic_cast<const JobPlanStepHostCompute*>(job_plan.steps[0].get()) != nullptr;
+    bool first_is_host_callback = dynamic_cast<const JobPlanStepHostCompute*>(
+                                      job_plan.steps[0].get()) != nullptr;
 
     if (first_is_host_callback) {
       enum class ExpectedStep {
@@ -526,23 +526,22 @@ JobPlanBuilder::ValidationResult JobPlanBuilder::validate(
         const auto& step = job_plan.steps[i];
 
         // Check step type using dynamic_cast
-        bool is_h2d = dynamic_cast<const JobPlanStepH2D*>(step.get()) != nullptr;
+        bool is_h2d =
+            dynamic_cast<const JobPlanStepH2D*>(step.get()) != nullptr;
         bool is_compute =
             dynamic_cast<const JobPlanStepCompute*>(step.get()) != nullptr;
 
         // Validate based on expected state
         switch (expected) {
           case ExpectedStep::H2D:
-            TORCH_CHECK(is_h2d,
-                        "Step ordering violation at step ", i,
+            TORCH_CHECK(is_h2d, "Step ordering violation at step ", i,
                         ": HostCallback must be followed by H2D transfer");
             // H2D must be followed by Compute
             expected = ExpectedStep::Compute;
             break;
 
           case ExpectedStep::Compute:
-            TORCH_CHECK(is_compute,
-                        "Step ordering violation at step ", i,
+            TORCH_CHECK(is_compute, "Step ordering violation at step ", i,
                         ": H2D transfer must be followed by Compute");
             sequence_complete = true;
             break;
