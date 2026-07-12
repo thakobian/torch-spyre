@@ -261,6 +261,9 @@ void initializeStreamPoolImpl(c10::DeviceIndex device_index) {
   // Register default stream (ID 0).
   pool.stream_handle_map[0] = runtime->getDefaultStream();
 
+  // Register host compute stream (ID 65).
+  pool.stream_handle_map[65] = runtime->getHostComputeStream();
+
   // Initialize low priority streams (IDs 1 to kStreamsPerDevice)
   pool.low_priority_streams[device_index].reserve(kStreamsPerDevice);
   for (int i = 1; i <= kStreamsPerDevice; ++i) {
