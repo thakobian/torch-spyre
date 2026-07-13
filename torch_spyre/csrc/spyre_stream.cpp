@@ -78,8 +78,10 @@ thread_local std::unordered_map<c10::DeviceIndex, c10::StreamId>
 // - Stream 0: Default stream (always available, priority 0)
 // - Streams 1-32: Low priority streams (priority 0)
 // - Streams 33-64: High priority streams (priority -1)
+// - Stream 65: Host compute stream (priority -1)
 constexpr int kStreamsPerDevice = 32;
 constexpr int kHighPriorityStreamsPerDevice = 32;
+constexpr int kHostComputeStreamId = 65;
 
 // Constructor
 SpyreStream::SpyreStream()
@@ -125,8 +127,8 @@ void SpyreStream::synchronize() const {
   DEBUGINFO("SpyreStream::synchronize() - stream ", id(), " on device ",
             static_cast<int>(device().index()));
 
-  flex::RuntimeStream* handle = resolveRuntimeHandle();
-  handle->synchronize();
+  resolveRuntimeHandle()->synchronize();
+  resolveRuntimeHandle(kHostComputeStreamId)->synchronize();
 }
 
 c10::Stream SpyreStream::unwrap() const {
@@ -176,15 +178,19 @@ void SpyreStream::copyAsync(const at::Tensor& src,
   }
 }
 
-flex::RuntimeStream* SpyreStream::resolveRuntimeHandle() const {
+flex::RuntimeStream* SpyreStream::resolveRuntimeHandle(c10::StreamId sid) const {
   auto& pool = getStreamPool();
   std::shared_lock<std::shared_mutex> lock(pool.mutex);
 
-  auto it = pool.stream_handle_map.find(id());
+  auto it = pool.stream_handle_map.find(sid);
   TORCH_CHECK(it != pool.stream_handle_map.end(),
-              "SpyreStream: no flex handle for stream id ", id(),
+              "SpyreStream: no flex handle for stream id ", sid,
               " — was the stream pool initialized for this device?");
   return it->second;
+}
+
+flex::RuntimeStream* SpyreStream::resolveRuntimeHandle() const {
+  return resolveRuntimeHandle(id());
 }
 
 void SpyreStream::copyAsyncImpl(void* cpu_ptr,
@@ -262,7 +268,7 @@ void initializeStreamPoolImpl(c10::DeviceIndex device_index) {
   pool.stream_handle_map[0] = runtime->getDefaultStream();
 
   // Register host compute stream (ID 65).
-  pool.stream_handle_map[65] = runtime->getHostComputeStream();
+  pool.stream_handle_map[kHostComputeStreamId] = runtime->getHostComputeStream();
 
   // Initialize low priority streams (IDs 1 to kStreamsPerDevice)
   pool.low_priority_streams[device_index].reserve(kStreamsPerDevice);
