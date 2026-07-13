@@ -268,7 +268,7 @@ void initializeStreamPoolImpl(c10::DeviceIndex device_index) {
   pool.stream_handle_map[0] = runtime->getDefaultStream();
 
   // Register host compute stream (ID 65).
-  pool.stream_handle_map[kHostComputeStreamId] = runtime->getHostComputeStream();
+  pool.stream_handle_map[kHostComputeStreamId] = runtime->createStream(flex::RuntimeStreamPriority::NORMAL);
 
   // Initialize low priority streams (IDs 1 to kStreamsPerDevice)
   pool.low_priority_streams[device_index].reserve(kStreamsPerDevice);
