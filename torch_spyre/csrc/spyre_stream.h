@@ -99,6 +99,16 @@ SpyreStream getDefaultStream(
     c10::Device device = c10::Device(c10::DeviceType::PrivateUse1, -1));
 
 /**
+ * Get the host compute stream for a device.
+ * The host compute stream is stream ID 65.
+ *
+ * @param device Device to get host compute stream for
+ * @return The host compute SpyreStream (stream ID 65)
+ */
+SpyreStream getHostComputeStream(
+    c10::Device device = c10::Device(c10::DeviceType::PrivateUse1, -1));
+
+/**
  * Get the Flex-level default stream for a device.
  * The default stream is stream ID 0 and is always available.
  *

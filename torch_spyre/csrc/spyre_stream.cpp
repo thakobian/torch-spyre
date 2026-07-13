@@ -299,6 +299,15 @@ SpyreStream getDefaultStream(c10::Device device) {
   return SpyreStream(c10::Stream(c10::Stream::DEFAULT, device));
 }
 
+SpyreStream getHostComputeStream(c10::Device device) {
+  if (device.index() == -1) {
+    device = c10::Device(c10::DeviceType::PrivateUse1, SpyreGuardImpl::tls_idx);
+  }
+  initializeStreamPool(device.index());
+  return SpyreStream(
+      c10::Stream(c10::Stream::UNSAFE, device, kHostComputeStreamId));
+}
+
 flex::RuntimeStream* getDefaultStreamRuntimeHandle(c10::Device device) {
   if (device.index() == -1) {
     device = c10::Device(c10::DeviceType::PrivateUse1, SpyreGuardImpl::tls_idx);
