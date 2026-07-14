@@ -81,12 +81,11 @@ thread_local std::unordered_map<c10::DeviceIndex, c10::StreamId>
 // - Stream 65: Host compute stream (priority -1)
 constexpr int kStreamsPerDevice = 32;
 constexpr int kHighPriorityStreamsPerDevice = 32;
-constexpr int kHostComputeStreamId = kStreamsPerDevice +
-                                     kHighPriorityStreamsPerDevice +
-                                     1
+constexpr int kHostComputeStreamId =
+    kStreamsPerDevice + kHighPriorityStreamsPerDevice + 1;
 
-                                     // Constructor
-                                     SpyreStream::SpyreStream()
+// Constructor
+SpyreStream::SpyreStream()
     : stream_(getCurrentStream(c10::Device(c10::DeviceType::PrivateUse1,
                                            SpyreGuardImpl::tls_idx))
                   .unwrap()) {}
@@ -412,7 +411,7 @@ void synchronizeDevice(c10::optional<c10::Device> device) {
 
       // Host Compute stream (ID 65) is always present when the pool is
       // initialized
-      auto host_compute_it = pool.stream_handle_map.find(65);
+      auto host_compute_it = pool.stream_handle_map.find(kHostComputeStreamId);
       if (host_compute_it != pool.stream_handle_map.end()) {
         handles_to_sync.push_back(host_compute_it->second);
       }
