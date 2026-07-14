@@ -81,10 +81,12 @@ thread_local std::unordered_map<c10::DeviceIndex, c10::StreamId>
 // - Stream 65: Host compute stream (priority -1)
 constexpr int kStreamsPerDevice = 32;
 constexpr int kHighPriorityStreamsPerDevice = 32;
-constexpr int kHostComputeStreamId = kStreamsPerDevice + kHighPriorityStreamsPerDevice + 1
+constexpr int kHostComputeStreamId = kStreamsPerDevice +
+                                     kHighPriorityStreamsPerDevice +
+                                     1
 
-// Constructor
-SpyreStream::SpyreStream()
+                                     // Constructor
+                                     SpyreStream::SpyreStream()
     : stream_(getCurrentStream(c10::Device(c10::DeviceType::PrivateUse1,
                                            SpyreGuardImpl::tls_idx))
                   .unwrap()) {}
