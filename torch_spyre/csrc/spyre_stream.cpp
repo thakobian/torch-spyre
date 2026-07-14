@@ -178,7 +178,8 @@ void SpyreStream::copyAsync(const at::Tensor& src,
   }
 }
 
-flex::RuntimeStream* SpyreStream::resolveRuntimeHandle(c10::StreamId sid) const {
+flex::RuntimeStream* SpyreStream::resolveRuntimeHandle(
+    c10::StreamId sid) const {
   auto& pool = getStreamPool();
   std::shared_lock<std::shared_mutex> lock(pool.mutex);
 
@@ -268,7 +269,8 @@ void initializeStreamPoolImpl(c10::DeviceIndex device_index) {
   pool.stream_handle_map[0] = runtime->getDefaultStream();
 
   // Register host compute stream (ID 65).
-  pool.stream_handle_map[kHostComputeStreamId] = runtime->createStream(flex::RuntimeStreamPriority::NORMAL);
+  pool.stream_handle_map[kHostComputeStreamId] =
+      runtime->createStream(flex::RuntimeStreamPriority::NORMAL);
 
   // Initialize low priority streams (IDs 1 to kStreamsPerDevice)
   pool.low_priority_streams[device_index].reserve(kStreamsPerDevice);
@@ -406,7 +408,8 @@ void synchronizeDevice(c10::optional<c10::Device> device) {
         handles_to_sync.push_back(default_it->second);
       }
 
-      // Host Compute stream (ID 65) is always present when the pool is initialized
+      // Host Compute stream (ID 65) is always present when the pool is
+      // initialized
       auto host_compute_it = pool.stream_handle_map.find(65);
       if (host_compute_it != pool.stream_handle_map.end()) {
         handles_to_sync.push_back(host_compute_it->second);
