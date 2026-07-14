@@ -15,6 +15,7 @@
 # Owner(s): ["module: stream"]
 
 import torch
+import torch_spyre
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 
@@ -196,6 +197,13 @@ class TestSpyreStream(TestCase):
         # Operations without explicit stream should use default stream
         a = torch.randn(5, 5, device="spyre")
         self.assertEqual(a.device.type, "spyre")
+
+    def test_host_compute_stream_exists(self):
+        """Test that the host compute stream (ID 65) exists and is accessible."""
+        stream = torch_spyre._C.host_compute_stream(self.device)
+        self.assertEqual(stream.id(), 65)
+        # Make sure we can synchronize the host compute stream without errors
+        stream.synchronize()
 
     def test_stream_query_after_context(self):
         """Test querying stream after exiting context."""

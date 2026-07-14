@@ -358,6 +358,9 @@ PYBIND11_MODULE(_C, m) {
   m.def("default_stream", &spyre::getDefaultStream, py::arg("device"),
         "Get the default stream for a device");
 
+  m.def("host_compute_stream", &spyre::getHostComputeStream, py::arg("device"),
+        "Get the host compute stream for a device");
+
   m.def("synchronize", &spyre::synchronizeDevice,
         py::arg("device") = py::none(), "Synchronize a device or all devices");
 
