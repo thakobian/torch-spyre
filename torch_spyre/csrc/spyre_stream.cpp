@@ -130,7 +130,6 @@ void SpyreStream::synchronize() const {
             static_cast<int>(device().index()));
 
   resolveRuntimeHandle()->synchronize();
-  resolveRuntimeHandle(kHostComputeStreamId)->synchronize();
 }
 
 c10::Stream SpyreStream::unwrap() const {
@@ -180,20 +179,15 @@ void SpyreStream::copyAsync(const at::Tensor& src,
   }
 }
 
-flex::RuntimeStream* SpyreStream::resolveRuntimeHandle(
-    c10::StreamId sid) const {
+flex::RuntimeStream* SpyreStream::resolveRuntimeHandle() const {
   auto& pool = getStreamPool();
   std::shared_lock<std::shared_mutex> lock(pool.mutex);
 
-  auto it = pool.stream_handle_map.find(sid);
+  auto it = pool.stream_handle_map.find(id());
   TORCH_CHECK(it != pool.stream_handle_map.end(),
-              "SpyreStream: no flex handle for stream id ", sid,
+              "SpyreStream: no flex handle for stream id ", id(),
               " — was the stream pool initialized for this device?");
   return it->second;
-}
-
-flex::RuntimeStream* SpyreStream::resolveRuntimeHandle() const {
-  return resolveRuntimeHandle(id());
 }
 
 void SpyreStream::copyAsyncImpl(void* cpu_ptr,
