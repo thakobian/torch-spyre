@@ -51,10 +51,13 @@ struct StreamPool {
       low_priority_streams;
   std::unordered_map<c10::DeviceIndex, std::vector<c10::StreamId>>
       high_priority_streams;
+  std::unordered_map<c10::DeviceIndex, std::vector<c10::StreamId>>
+      host_compute_streams;
 
   // Round-robin indices
   std::unordered_map<c10::DeviceIndex, size_t> next_low_priority_idx;
   std::unordered_map<c10::DeviceIndex, size_t> next_high_priority_idx;
+  std::unordered_map<c10::DeviceIndex, size_t> next_host_compute_idx;
 
   // Mapping from c10::StreamId to flex::RuntimeStream*
   std::unordered_map<c10::StreamId, flex::RuntimeStream*> stream_handle_map;
@@ -78,11 +81,16 @@ thread_local std::unordered_map<c10::DeviceIndex, c10::StreamId>
 // - Stream 0: Default stream (always available, priority 0)
 // - Streams 1-32: Low priority streams (priority 0)
 // - Streams 33-64: High priority streams (priority -1)
-// - Stream 65: Host compute stream (priority -1)
+// - Stream 65+: Host compute streams (priority -1)
 constexpr int kStreamsPerDevice = 32;
 constexpr int kHighPriorityStreamsPerDevice = 32;
-constexpr int kHostComputeStreamId =
-    kStreamsPerDevice + kHighPriorityStreamsPerDevice + 1;
+constexpr int kHostComputeStreamStartPerDevice = 65;
+
+// Read from environment variable, default to 1
+inline int getNumHostComputeStreams() {
+  const char* env = std::getenv("TORCH_SPYRE_NUM_HOST_COMPUTE_STREAMS");
+  return env ? std::atoi(env) : 1;
+}
 
 // Constructor
 SpyreStream::SpyreStream()
@@ -125,8 +133,7 @@ bool SpyreStream::query() const {
 void SpyreStream::synchronize() const {
   c10::DeviceGuard guard(stream_.device());
 
-  DEBUGINFO("SpyreStream::synchronize() - stream ", id(),
-            " and host compute stream ", kHostComputeStreamId, " on device ",
+  DEBUGINFO("SpyreStream::synchronize() - stream ", id(), " on device ",
             static_cast<int>(device().index()));
 
   resolveRuntimeHandle()->synchronize();
@@ -264,9 +271,13 @@ void initializeStreamPoolImpl(c10::DeviceIndex device_index) {
   // Register default stream (ID 0).
   pool.stream_handle_map[0] = runtime->getDefaultStream();
 
-  // Register host compute stream (ID 65).
-  pool.stream_handle_map[kHostComputeStreamId] =
-      runtime->createStream(flex::RuntimeStreamPriority::NORMAL);
+  // Register host compute streams (IDs 65+)
+  int num_host_streams = getNumHostComputeStreams();
+  pool.host_compute_streams[device_index].reserve(num_host_streams);
+  for (int i = 0; i < num_host_streams; ++i) {
+    pool.host_compute_streams[device_index].push_back(kHostComputeStreamId + i);
+  }
+  pool.next_host_compute_idx[device_index] = 0;
 
   // Initialize low priority streams (IDs 1 to kStreamsPerDevice)
   pool.low_priority_streams[device_index].reserve(kStreamsPerDevice);
