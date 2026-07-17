@@ -274,8 +274,8 @@ void initializeStreamPoolImpl(c10::DeviceIndex device_index) {
   // Register host compute streams (IDs 65+)
   int num_host_streams = getNumHostComputeStreams();
   pool.host_compute_streams[device_index].reserve(num_host_streams);
-  c10::StreamId sid = kHostComputeStreamStartPerDevice + i;
   for (int i = 0; i < num_host_streams; ++i) {
+    c10::StreamId sid = kHostComputeStreamStartPerDevice + i;
     pool.stream_handle_map[sid] =
         runtime->createStream(flex::RuntimeStreamPriority::NORMAL);
     pool.host_compute_streams[device_index].push_back(sid);
@@ -309,15 +309,6 @@ SpyreStream getDefaultStream(c10::Device device) {
   }
   initializeStreamPool(device.index());
   return SpyreStream(c10::Stream(c10::Stream::DEFAULT, device));
-}
-
-SpyreStream getHostComputeStream(c10::Device device) {
-  if (device.index() == -1) {
-    device = c10::Device(c10::DeviceType::PrivateUse1, SpyreGuardImpl::tls_idx);
-  }
-  initializeStreamPool(device.index());
-  return SpyreStream(
-      c10::Stream(c10::Stream::UNSAFE, device, kHostComputeStreamId));
 }
 
 flex::RuntimeStream* getDefaultStreamRuntimeHandle(c10::Device device) {
@@ -371,6 +362,14 @@ SpyreStream getHostComputeStream(c10::Device device) {
   idx = (idx + 1) % streams.size();
 
   return SpyreStream(c10::Stream(c10::Stream::UNSAFE, device, stream_id));
+}
+
+SpyreStream getHostComputeStream(c10::StreamId id, c10::Device device) {
+  if (device.index() == -1) {
+    device = c10::Device(c10::DeviceType::PrivateUse1, SpyreGuardImpl::tls_idx);
+  }
+  initializeStreamPool(device.index());
+  return SpyreStream(c10::Stream(c10::Stream::UNSAFE, device, id));
 }
 
 SpyreStream getStreamFromPool(c10::Device device, int priority) {
