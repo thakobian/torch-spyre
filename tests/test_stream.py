@@ -198,11 +198,20 @@ class TestSpyreStream(TestCase):
         a = torch.randn(5, 5, device="spyre")
         self.assertEqual(a.device.type, "spyre")
 
-    def test_host_compute_stream_exists(self):
-        """Test that the host compute stream (ID 65) exists and is accessible."""
-        stream = torch_spyre._C.host_compute_stream(self.device)
+    def test_host_compute_stream_round_robin(self):
+        """Consecutive host compute streams are handed out round-robin."""
+        stream1 = torch_spyre._C.host_compute_stream(self.device)
+        stream2 = torch_spyre._C.host_compute_stream(self.device)
+        self.assertNotEqual(stream1.id(), stream2.id())
+        # Make sure the streams can be synchronized without errors.
+        stream1.synchronize()
+        stream2.synchronize()
+
+    def test_host_compute_stream_by_id(self):
+        """host_compute_stream_by_id returns the stream with the requested ID."""
+        stream = torch_spyre._C.host_compute_stream_by_id(65, self.device)
         self.assertEqual(stream.id(), 65)
-        # Make sure we can synchronize the host compute stream without errors
+        # Make sure we can synchronize the host compute stream without errors.
         stream.synchronize()
 
     def test_stream_query_after_context(self):
