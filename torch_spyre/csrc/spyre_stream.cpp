@@ -435,13 +435,6 @@ void synchronizeDevice(c10::optional<c10::Device> device) {
         handles_to_sync.push_back(default_it->second);
       }
 
-      // Host Compute stream (ID 65) is always present when the pool is
-      // initialized
-      auto host_compute_it = pool.stream_handle_map.find(kHostComputeStreamId);
-      if (host_compute_it != pool.stream_handle_map.end()) {
-        handles_to_sync.push_back(host_compute_it->second);
-      }
-
       auto collect = [&](auto& stream_map) {
         auto it = stream_map.find(device_index);
         if (it == stream_map.end()) return;
@@ -454,6 +447,7 @@ void synchronizeDevice(c10::optional<c10::Device> device) {
       };
       collect(pool.low_priority_streams);
       collect(pool.high_priority_streams);
+      collect(pool.host_compute_streams);
     }  // lock released
 
     auto runtime = GlobalRuntime::get();
