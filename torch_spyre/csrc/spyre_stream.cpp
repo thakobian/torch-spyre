@@ -86,10 +86,10 @@ constexpr int kStreamsPerDevice = 32;
 constexpr int kHighPriorityStreamsPerDevice = 32;
 constexpr int kHostComputeStreamStartPerDevice = 65;
 
-// Read from environment variable, default to 1
+// Read from environment variable, default to 4
 inline int getNumHostComputeStreams() {
   const char* env = std::getenv("TORCH_SPYRE_NUM_HOST_COMPUTE_STREAMS");
-  return env ? std::atoi(env) : 1;
+  return env ? std::atoi(env) : 4;
 }
 
 // Constructor
@@ -274,8 +274,11 @@ void initializeStreamPoolImpl(c10::DeviceIndex device_index) {
   // Register host compute streams (IDs 65+)
   int num_host_streams = getNumHostComputeStreams();
   pool.host_compute_streams[device_index].reserve(num_host_streams);
+  c10::StreamId sid = kHostComputeStreamStartPerDevice + i;
   for (int i = 0; i < num_host_streams; ++i) {
-    pool.host_compute_streams[device_index].push_back(kHostComputeStreamId + i);
+    pool.stream_handle_map[sid] =
+        runtime->createStream(flex::RuntimeStreamPriority::NORMAL);
+    pool.host_compute_streams[device_index].push_back(sid);
   }
   pool.next_host_compute_idx[device_index] = 0;
 
@@ -350,6 +353,24 @@ SpyreStream setCurrentStream(SpyreStream stream) {
   auto old_stream = getCurrentStream(device);
   current_streams[device.index()] = stream.id();
   return old_stream;
+}
+
+SpyreStream getHostComputeStream(c10::Device device) {
+  if (device.index() == -1) {
+    device = c10::Device(c10::DeviceType::PrivateUse1, SpyreGuardImpl::tls_idx);
+  }
+  initializeStreamPool(device.index());
+
+  auto& pool = getStreamPool();
+  std::unique_lock<std::shared_mutex> lock(pool.mutex);
+
+  auto& streams = pool.host_compute_streams[device.index()];
+  auto& idx = pool.next_host_compute_idx[device.index()];
+
+  c10::StreamId stream_id = streams[idx];
+  idx = (idx + 1) % streams.size();
+
+  return SpyreStream(c10::Stream(c10::Stream::UNSAFE, device, stream_id));
 }
 
 SpyreStream getStreamFromPool(c10::Device device, int priority) {
