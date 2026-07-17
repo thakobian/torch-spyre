@@ -61,6 +61,12 @@ ignore_work_division_hints: bool = (
 
 ignore_wsr_hints: bool = os.environ.get("SPYRE_INDUCTOR_IGNORE_HINTS", "0") == "1"
 
+# Per-pass operation logging for CustomPreSchedulingPasses.
+# Set to "all" or "1" to log after every pass, or a comma-separated list of
+# pass function names (e.g., "split_multi_ops,insert_restickify") to log only
+# after specific passes. Set via SPYRE_LOG_PASSES env var or programmatically.
+log_passes: str = os.environ.get("SPYRE_LOG_PASSES", "")
+
 # Disable compiler-generated span-overflow coarse-tiling hints.  The global
 # SPYRE_INDUCTOR_IGNORE_HINTS flag also disables these so one switch can still
 # suppress all WSR/coarse-tiling hint paths.
@@ -100,9 +106,13 @@ unroll_loops: bool = os.environ.get("UNROLL_LOOPS", "1") == "1"
 # Options:
 #  "greedy":   GreedyLayoutSolver (default),
 #  "bestfit":  BestFitLayoutSolver,
-#  "firstfit": FirstFitLayoutSolver.
+#  "firstfit": FirstFitLayoutSolver,
+#  "cpsat":    CpSatLayoutSolver (OR-Tools CP-SAT joint core-division +
+#              LX placement, minimizing HBM transfer traffic).
 
 # TODO(isuruf): Change to firstfit when deeptools PR4298 lands
-layout_solver: Literal["greedy", "bestfit", "firstfit"] = "greedy"
+layout_solver: Literal["greedy", "bestfit", "firstfit", "cpsat"] = os.environ.get(
+    "LAYOUT_SOLVER", "greedy"
+)  # type: ignore[assignment]
 
 install_config_module(sys.modules[__name__])
