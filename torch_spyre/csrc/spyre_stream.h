@@ -115,7 +115,7 @@ SpyreStream getHostComputeStream(
  * @param device Device the stream belongs to
  * @return The host compute SpyreStream with the given ID
  */
-SpyreStream getHostComputeStream(
+SpyreStream getHostComputeStreamById(
     c10::StreamId id,
     c10::Device device = c10::Device(c10::DeviceType::PrivateUse1, -1));
 

@@ -364,7 +364,7 @@ SpyreStream getHostComputeStream(c10::Device device) {
   return SpyreStream(c10::Stream(c10::Stream::UNSAFE, device, stream_id));
 }
 
-SpyreStream getHostComputeStream(c10::StreamId id, c10::Device device) {
+SpyreStream getHostComputeStreamById(c10::StreamId id, c10::Device device) {
   if (device.index() == -1) {
     device = c10::Device(c10::DeviceType::PrivateUse1, SpyreGuardImpl::tls_idx);
   }
