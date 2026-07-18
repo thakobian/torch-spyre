@@ -85,11 +85,18 @@ thread_local std::unordered_map<c10::DeviceIndex, c10::StreamId>
 constexpr int kStreamsPerDevice = 32;
 constexpr int kHighPriorityStreamsPerDevice = 32;
 constexpr int kHostComputeStreamStartPerDevice = 65;
+constexpr int kDefaultHostComputeStreams = 4;
+constexpr int kMaxHostComputeStreams = 8;
 
-// Read from environment variable, default to 4
+// Read from environment variable, default to 4. A missing, zero, or malformed
+// value falls back to the default; the count is capped at
+// kMaxHostComputeStreams.
 inline int getNumHostComputeStreams() {
   const char* env = std::getenv("TORCH_SPYRE_NUM_HOST_COMPUTE_STREAMS");
-  return env ? std::atoi(env) : 4;
+  int n = env ? std::atoi(env) : kDefaultHostComputeStreams;
+  if (n < 1) n = kDefaultHostComputeStreams;
+  if (n > kMaxHostComputeStreams) n = kMaxHostComputeStreams;
+  return n;
 }
 
 // Constructor
@@ -350,6 +357,11 @@ SpyreStream getHostComputeStream(c10::Device device) {
   if (device.index() == -1) {
     device = c10::Device(c10::DeviceType::PrivateUse1, SpyreGuardImpl::tls_idx);
   }
+
+  // Ensure runtime is initialized before creating streams
+  // This is critical when this is called before any tensor operations
+  startRuntime();
+
   initializeStreamPool(device.index());
 
   auto& pool = getStreamPool();
@@ -368,6 +380,11 @@ SpyreStream getHostComputeStreamById(c10::StreamId id, c10::Device device) {
   if (device.index() == -1) {
     device = c10::Device(c10::DeviceType::PrivateUse1, SpyreGuardImpl::tls_idx);
   }
+
+  // Ensure runtime is initialized before creating streams
+  // This is critical when this is called before any tensor operations
+  startRuntime();
+
   initializeStreamPool(device.index());
   return SpyreStream(c10::Stream(c10::Stream::UNSAFE, device, id));
 }
