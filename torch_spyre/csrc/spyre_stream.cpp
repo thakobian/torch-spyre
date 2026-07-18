@@ -386,6 +386,14 @@ SpyreStream getHostComputeStreamById(c10::StreamId id, c10::Device device) {
   startRuntime();
 
   initializeStreamPool(device.index());
+
+  const c10::StreamId end =
+      kHostComputeStreamStartPerDevice + getNumHostComputeStreams();
+  TORCH_CHECK(id >= kHostComputeStreamStartPerDevice && id < end,
+              "getHostComputeStreamById: stream id ", id,
+              " is not a host compute stream id (valid range [",
+              kHostComputeStreamStartPerDevice, ", ", end, "))");
+
   return SpyreStream(c10::Stream(c10::Stream::UNSAFE, device, id));
 }
 
