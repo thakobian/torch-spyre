@@ -60,6 +60,10 @@ struct StreamPool {
   std::unordered_map<c10::DeviceIndex, size_t> next_host_compute_idx;
 
   // Mapping from c10::StreamId to flex::RuntimeStream*
+  // TODO(thakobian): multi-device support — this map is not keyed by device, so
+  // the same stream id (e.g. the default stream 0 or a host compute stream)
+  // registered on a second device silently overwrites the first. Key by
+  // (c10::DeviceIndex, c10::StreamId) so each device has independent handles.
   std::unordered_map<c10::StreamId, flex::RuntimeStream*> stream_handle_map;
 
   // Per-device initialization flags
@@ -283,6 +287,14 @@ void initializeStreamPoolImpl(c10::DeviceIndex device_index) {
   pool.host_compute_streams[device_index].reserve(num_host_streams);
   for (int i = 0; i < num_host_streams; ++i) {
     c10::StreamId sid = kHostComputeStreamStartPerDevice + i;
+    // stream_handle_map is not yet keyed by device, so the same stream id on a
+    // second device would silently overwrite the first. Fail loudly until the
+    // map is device-keyed for multi-device support.
+    TORCH_CHECK(
+        pool.stream_handle_map.find(sid) == pool.stream_handle_map.end(),
+        "Host compute stream id ", sid,
+        " is already registered; stream_handle_map does not support "
+        "multiple devices yet");
     pool.stream_handle_map[sid] =
         runtime->createStream(flex::RuntimeStreamPriority::NORMAL);
     pool.host_compute_streams[device_index].push_back(sid);
