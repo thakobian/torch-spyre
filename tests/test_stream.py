@@ -199,20 +199,29 @@ class TestSpyreStream(TestCase):
         self.assertEqual(a.device.type, "spyre")
 
     def test_host_compute_stream_round_robin(self):
-        """Consecutive host compute streams are handed out round-robin."""
-        stream1 = torch_spyre._C.host_compute_stream(self.device)
-        stream2 = torch_spyre._C.host_compute_stream(self.device)
-        self.assertNotEqual(stream1.id(), stream2.id())
-        # Make sure the streams can be synchronized without errors.
-        stream1.synchronize()
-        stream2.synchronize()
+        """Host compute streams are handed out round-robin with no duplicates
+        within a cycle, whatever the configured count is."""
+        first = torch_spyre._C.host_compute_stream(self.device).id()
+        seen = [first]
+        # Walk one full cycle: keep pulling streams until we wrap back to the
+        # first one. Every stream seen before wrapping must be distinct.
+        while True:
+            sid = torch_spyre._C.host_compute_stream(self.device).id()
+            if sid == first:
+                break
+            self.assertNotIn(sid, seen)
+            seen.append(sid)
+
+    def test_host_compute_stream_synchronize(self):
+        """A host compute stream can be synchronized without errors."""
+        stream = torch_spyre._C.host_compute_stream(self.device)
+        stream.synchronize()
 
     def test_host_compute_stream_by_id(self):
         """host_compute_stream_by_id returns the stream with the requested ID."""
-        stream = torch_spyre._C.host_compute_stream_by_id(65, self.device)
-        self.assertEqual(stream.id(), 65)
-        # Make sure we can synchronize the host compute stream without errors.
-        stream.synchronize()
+        expected_id = torch_spyre._C.host_compute_stream(self.device).id()
+        stream = torch_spyre._C.host_compute_stream_by_id(expected_id, self.device)
+        self.assertEqual(stream.id(), expected_id)
 
     def test_stream_query_after_context(self):
         """Test querying stream after exiting context."""
