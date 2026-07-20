@@ -59,11 +59,12 @@ struct StreamPool {
   std::unordered_map<c10::DeviceIndex, size_t> next_high_priority_idx;
   std::unordered_map<c10::DeviceIndex, size_t> next_host_compute_idx;
 
-  // Mapping from c10::StreamId to flex::RuntimeStream*
-  // TODO(thakobian): multi-device support — this map is not keyed by device, so
-  // the same stream id (e.g. the default stream 0 or a host compute stream)
-  // registered on a second device silently overwrites the first. Key by
-  // (c10::DeviceIndex, c10::StreamId) so each device has independent handles.
+  // Mapping from c10::StreamId to flex::RuntimeStream*.
+  // NOTE: this assumes one Spyre device per process (PyTorch's model for
+  // multi-device use is one process per device), so the map is keyed by stream
+  // id only. Supporting multiple devices in a single process would require
+  // keying by (c10::DeviceIndex, c10::StreamId) so each device has its own
+  // handles.
   std::unordered_map<c10::StreamId, flex::RuntimeStream*> stream_handle_map;
 
   // Per-device initialization flags
@@ -92,13 +93,15 @@ constexpr int kHostComputeStreamStartPerDevice = 65;
 constexpr int kDefaultHostComputeStreams = 4;
 constexpr int kMaxHostComputeStreams = 8;
 
-// Read from environment variable, default to 4. A missing, zero, or malformed
-// value falls back to the default; the count is capped at
-// kMaxHostComputeStreams.
+// Read from environment variable, defaulting to kDefaultHostComputeStreams when
+// unset. An explicit value less than 1 (including malformed input, which parses
+// to 0) is an error; values above kMaxHostComputeStreams are capped.
 inline int getNumHostComputeStreams() {
   const char* env = std::getenv("TORCH_SPYRE_NUM_HOST_COMPUTE_STREAMS");
   int n = env ? std::atoi(env) : kDefaultHostComputeStreams;
-  if (n < 1) n = kDefaultHostComputeStreams;
+  TORCH_CHECK(n >= 1,
+              "TORCH_SPYRE_NUM_HOST_COMPUTE_STREAMS must be at least 1, got '",
+              env, "'");
   if (n > kMaxHostComputeStreams) n = kMaxHostComputeStreams;
   return n;
 }
@@ -287,14 +290,14 @@ void initializeStreamPoolImpl(c10::DeviceIndex device_index) {
   pool.host_compute_streams[device_index].reserve(num_host_streams);
   for (int i = 0; i < num_host_streams; ++i) {
     c10::StreamId sid = kHostComputeStreamStartPerDevice + i;
-    // stream_handle_map is not yet keyed by device, so the same stream id on a
-    // second device would silently overwrite the first. Fail loudly until the
-    // map is device-keyed for multi-device support.
+    // Enforce the single-device-per-process assumption: stream_handle_map is
+    // keyed by stream id only, so registering the same id from a second device
+    // would silently overwrite the first. Fail loudly instead.
     TORCH_CHECK(
         pool.stream_handle_map.find(sid) == pool.stream_handle_map.end(),
         "Host compute stream id ", sid,
-        " is already registered; stream_handle_map does not support "
-        "multiple devices yet");
+        " is already registered; only one Spyre device per process is "
+        "supported");
     pool.stream_handle_map[sid] =
         runtime->createStream(flex::RuntimeStreamPriority::NORMAL);
     pool.host_compute_streams[device_index].push_back(sid);
