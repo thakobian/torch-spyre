@@ -294,10 +294,15 @@ void initializeStreamPoolImpl(c10::DeviceIndex device_index) {
     // yet. stream_handle_map is keyed by stream id, not device, so when the
     // pool is initialized under more than one device index in the same process
     // (all mapping to the same runtime) the handle is created once and reused.
-    if (pool.stream_handle_map.find(sid) == pool.stream_handle_map.end()) {
-      pool.stream_handle_map[sid] =
-          runtime->createStream(flex::RuntimeStreamPriority::NORMAL);
-    }
+    // if (pool.stream_handle_map.find(sid) == pool.stream_handle_map.end()) {
+    //   pool.stream_handle_map[sid] =
+    //       runtime->createStream(flex::RuntimeStreamPriority::NORMAL);
+    // }
+    TORCH_CHECK(
+        pool.stream_handle_map.find(sid) == pool.stream_handle_map.end(),
+        "Host compute stream id ", sid,
+        " is already registered; only one Spyre device per process is "
+        "supported");
     pool.host_compute_streams[device_index].push_back(sid);
   }
   pool.next_host_compute_idx[device_index] = 0;
