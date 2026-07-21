@@ -303,6 +303,8 @@ void initializeStreamPoolImpl(c10::DeviceIndex device_index) {
         "Host compute stream id ", sid,
         " is already registered; only one Spyre device per process is "
         "supported");
+    pool.stream_handle_map[sid] =
+        runtime->createStream(flex::RuntimeStreamPriority::NORMAL);
     pool.host_compute_streams[device_index].push_back(sid);
   }
   pool.next_host_compute_idx[device_index] = 0;
