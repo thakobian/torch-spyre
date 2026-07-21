@@ -55,12 +55,6 @@ class TestAllGather(TestCase):
     @classmethod
     def setUpClass(cls):
         """Set up the distributed environment once for all tests."""
-        # Align the current device with this rank's device before initializing
-        # the process group. Collective setup uses the default/current device,
-        # so without this it would target spyre:0 while the rank's data lives on
-        # spyre:{RANK}, initializing the stream pool under two device indices.
-        torch.spyre.set_device(DEVICE.index)
-
         if not dist.distributed_c10d.is_backend_available(C10D_BACKEND):
             raise RuntimeError(f"Error: Missing the C10 Backend {C10D_BACKEND}")
         if C10D_BACKEND != dist.get_default_backend_for_device("spyre"):
