@@ -84,7 +84,7 @@ thread_local std::unordered_map<c10::DeviceIndex, c10::StreamId>
 // Stream pool configuration
 // Per device:
 // - Stream 0: Default stream (always available, priority 0)
-// - Streams 1-32: Low priority streams (priority 0)1
+// - Streams 1-32: Low priority streams (priority 0)
 // - Streams 33-64: High priority streams (priority -1)
 // - Stream 65+: Host compute streams (priority -1)
 constexpr int kStreamsPerDevice = 32;
@@ -276,12 +276,6 @@ void SpyreStream::launch(const JobPlan& plan,
 void initializeStreamPoolImpl(c10::DeviceIndex device_index) {
   auto& pool = getStreamPool();
   std::unique_lock<std::shared_mutex> lock(pool.mutex);
-
-  // TEMP DIAGNOSTIC: record which device index is being initialized and the
-  // current thread-local device, so we can see where a second index enters.
-  DEBUGINFO(
-      "initializeStreamPoolImpl: device_index=", static_cast<int>(device_index),
-      " tls_idx=", static_cast<int>(SpyreGuardImpl::tls_idx));
 
   // Initialize mapping from StreamId → RuntimeStream*.
   // RuntimeStream instances are owned by GlobalRuntime.
