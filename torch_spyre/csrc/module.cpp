@@ -94,6 +94,13 @@ void _startRuntime() {
     logical_device_id = tls_idx;
   } else if (const char* lr = std::getenv("LOCAL_RANK")) {
     logical_device_id = std::atoi(lr);
+    // Propagate the rank's device to the current (c10) device. Stream and pool
+    // lookups fall back to SpyreGuardImpl::tls_idx whenever a caller does not
+    // carry an explicit device (e.g. collective setup). Without this, a
+    // torchrun rank whose data lives on spyre:{LOCAL_RANK} would keep current
+    // device 0, initializing the stream pool under two indices for one physical
+    // device and colliding on the shared stream-id map.
+    SpyreGuardImpl::tls_idx = static_cast<c10::DeviceIndex>(logical_device_id);
   }
 
   const int num_devices = getVisibleDeviceCount();
