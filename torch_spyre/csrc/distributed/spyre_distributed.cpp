@@ -31,6 +31,7 @@
 
 #include "../logging.h"
 #include "../spyre_allocator.h"
+#include "../spyre_composite_address.h"
 #include "../spyre_stream.h"
 #include "../spyre_tensor_impl.h"
 
@@ -82,31 +83,6 @@ spyre_comms::TensorDataTypeEnum torch_dtype_to_spyre_comms(
     default:
       TORCH_CHECK(false, "Unsupported dtype for spyre_comms: ", dtype);
   }
-}
-
-// Helper to get CompositeAddress pointer from a Spyre tensor
-// NOTE: The returned pointer is valid only as long as the tensor's storage
-// context remains valid. Caller must keep the tensor alive.
-const flex::CompositeAddress* get_composite_address(const at::Tensor& tensor) {
-  TORCH_CHECK(tensor.is_privateuseone(),
-              "Tensor must be on Spyre device for distributed operations");
-
-  TORCH_CHECK(tensor.is_contiguous(),
-              "Tensor must be contiguous for distributed operations");
-
-  auto* spyre_impl =
-      static_cast<SpyreTensorImpl*>(tensor.unsafeGetTensorImpl());
-  TORCH_CHECK(spyre_impl != nullptr, "SpyreTensorImpl is null");
-
-  auto& storage = spyre_impl->storage();
-  auto* data_ptr = storage.data_ptr().get();
-  TORCH_CHECK(data_ptr != nullptr, "Storage data pointer is null");
-
-  auto* ctx = static_cast<SharedOwnerCtx*>(storage.data_ptr().get_context());
-  TORCH_CHECK(ctx != nullptr, "SharedOwnerCtx is null");
-
-  // Return a pointer to the CompositeAddress inside the context
-  return &ctx->composite_addr;
 }
 
 // Async broadcast implementation - returns immediately
@@ -225,15 +201,12 @@ at::Tensor spyre_allgather_async_impl(const at::Tensor& input,
   spyre_comms::TensorShape input_shape({dev_total_elems});
   spyre_comms::TensorInfo input_info(dtype, input_shape);
 
-  auto* input_ctx = static_cast<spyre::SharedOwnerCtx*>(
-      input.storage().data_ptr().get_context());
-  TORCH_CHECK(input_ctx != nullptr, "SharedOwnerCtx is null for input tensor");
   TORCH_CHECK(input.is_contiguous() && !input.is_sparse(),
               "all_gather_async requires a contiguous, dense input");
 
   spyre_comms::Tensor input_tensor(input_info,
                                    input.storage().data_ptr().get());
-  input_tensor.SetSpyreDeviceAddressBorrowed(&input_ctx->composite_addr);
+  input_tensor.SetSpyreDeviceAddressBorrowed(get_composite_address(input));
 
   // Create per-rank output tensors (same shape as input)
   std::vector<at::Tensor> rank_outputs;
@@ -247,13 +220,10 @@ at::Tensor spyre_allgather_async_impl(const at::Tensor& input,
   std::vector<spyre_comms::Tensor> output_tensors;
   output_tensors.reserve(group_size);
   for (int64_t i = 0; i < group_size; i++) {
-    auto* out_ctx = static_cast<spyre::SharedOwnerCtx*>(
-        rank_outputs[i].storage().data_ptr().get_context());
-    TORCH_CHECK(out_ctx != nullptr, "SharedOwnerCtx is null for output tensor ",
-                i);
     spyre_comms::Tensor out_tensor(input_info,
                                    rank_outputs[i].storage().data_ptr().get());
-    out_tensor.SetSpyreDeviceAddressBorrowed(&out_ctx->composite_addr);
+    out_tensor.SetSpyreDeviceAddressBorrowed(
+        get_composite_address(rank_outputs[i]));
     output_tensors.push_back(std::move(out_tensor));
   }
 
