@@ -25,7 +25,7 @@ from transformers import AutoConfig
 
 from torch_spyre._C import (  # type: ignore[attr-defined]
     SharedHostPool,
-    get_composite_address_handle,
+    get_composite_address,
 )
 
 
@@ -114,7 +114,7 @@ class TestSharedHostPool(TestCase):
         kv_page_tensor = torch.randn(kv_page_shape, device="spyre", dtype=torch.float16)
 
         # Padded/tiled byte count of the page is the slot size
-        slot_bytes = get_composite_address_handle(kv_page_tensor).total_size()
+        slot_bytes = get_composite_address(kv_page_tensor).total_size()
 
         # Choosing common prompt length of 8192 (tokens) for testing
         slot_count = 8192 // block_size
@@ -140,7 +140,7 @@ class TestSharedHostPool(TestCase):
         kv_page_tensor = torch.randn(kv_page_shape, device="spyre", dtype=torch.float16)
 
         # Padded/tiled byte count of the page is the slot size
-        slot_bytes = get_composite_address_handle(kv_page_tensor).total_size()
+        slot_bytes = get_composite_address(kv_page_tensor).total_size()
 
         # Choosing common prompt length of 8192 (tokens) for testing
         slot_count = 8192 // block_size
