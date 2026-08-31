@@ -33,6 +33,8 @@ def _attach_and_check(pool_name, slot_count, slot_bytes):
     """
     Helper function for multiprocessing work
     """
+    import traceback
+
     from torch_spyre._C import (  # type: ignore[attr-defined]
         SharedHostPool,
     )
@@ -40,9 +42,16 @@ def _attach_and_check(pool_name, slot_count, slot_bytes):
     try:
         SharedHostPool.create_or_attach(pool_name, slot_count + 1, slot_bytes)
     except RuntimeError:
+        # Expected: attaching with mismatched geometry proves the child saw the
+        # parent's pool.
         sys.exit(0)
+    except Exception:
+        traceback.print_exc()
+        sys.exit(3)
 
-    sys.exit(1)
+    # No error raised: the child created a fresh pool instead of seeing the
+    # parent's, so cross-process sharing did not happen.
+    sys.exit(2)
 
 
 class TestSharedHostPool(TestCase):
@@ -163,7 +172,12 @@ class TestSharedHostPool(TestCase):
             p.join()
             self.fail("Child process timed out")
 
-        self.assertEqual(p.exitcode, 0)
+        reason = {
+            0: "shared correctly",
+            2: "child created a fresh pool (did not see parent's)",
+            3: "child raised an unexpected exception (see traceback above)",
+        }.get(p.exitcode, f"child exited {p.exitcode}")
+        self.assertEqual(p.exitcode, 0, reason)
 
     def test_name(self):
         # Create a shared pool
