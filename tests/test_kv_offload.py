@@ -26,7 +26,7 @@ from transformers import AutoConfig
 from torch_spyre._C import (  # type: ignore[attr-defined]
     SharedHostPool,
     copy_tensor_raw,
-    get_composite_address_handle,
+    get_composite_address,
 )
 
 
@@ -63,7 +63,7 @@ class TestSpyre(TestCase):
         Test if the bytes survived a round trip from spyre to host memory pool and back to spyre.
         """
         # Composite address handle for the tensor to determine the size of the slot needed in the shared host pool
-        slot_bytes = get_composite_address_handle(kv_page_tensor).total_size()
+        slot_bytes = get_composite_address(kv_page_tensor).total_size
 
         # Create the shared pool with a single slot of the required size
         pool = SharedHostPool.create_or_attach(
@@ -130,7 +130,7 @@ class TestSpyre(TestCase):
         kv_page_tensor = torch.randn(10, device="spyre", dtype=torch.float16)
 
         # Composite address handle for the tensor to determine the size of the slot needed in the shared host pool
-        slot_bytes = get_composite_address_handle(kv_page_tensor).total_size()
+        slot_bytes = get_composite_address(kv_page_tensor).total_size
 
         # Create the shared pool with a single slot of the required size
         pool = SharedHostPool.create_or_attach(
