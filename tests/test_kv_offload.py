@@ -14,7 +14,8 @@
 
 
 import torch
-import os
+import sys
+import multiprocessing as mp
 
 from torch.testing._internal.common_utils import (
     TestCase,
@@ -27,6 +28,24 @@ from torch_spyre._C import (  # type: ignore[attr-defined]
     copy_tensor_raw,
     get_composite_address_handle,
 )
+
+
+def _reload_and_check(pool_name, shape, slot_bytes, expected_cpu):
+    """
+    Helper function for multiprocessing.
+    """
+    import torch
+    from torch_spyre._C import (  # type: ignore[attr-defined]
+        SharedHostPool,
+        copy_tensor_raw,
+    )
+
+    pool = SharedHostPool.create_or_attach(pool_name, 1, slot_bytes)
+    t = torch.empty(shape, device="spyre", dtype=torch.float16)
+
+    # H2D: Move tensor back from host memory pool to spyre
+    copy_tensor_raw(t, pool, 0, to_device=True)
+    sys.exit(0 if torch.equal(t.to("cpu"), expected_cpu) else 1)
 
 
 class TestSpyre(TestCase):
@@ -107,6 +126,7 @@ class TestSpyre(TestCase):
         """
         Test if the bytes survived a round trip from spyre to host memory pool and back to spyre with different processes.
         """
+        ctx = mp.get_context("spawn")
         kv_page_tensor = torch.randn(10, device="spyre", dtype=torch.float16)
 
         # Composite address handle for the tensor to determine the size of the slot needed in the shared host pool
@@ -117,30 +137,21 @@ class TestSpyre(TestCase):
             self.id(), num_slots=1, slot_bytes=slot_bytes
         )
 
-        # Use the first slot in the pool
-        slot_id = 0
+        # Parent writes (D2H); child (separate process) reads it back.
+        copy_tensor_raw(kv_page_tensor, pool, 0, to_device=False)
+        expected_cpu = kv_page_tensor.to("cpu")
 
-        pid = os.fork()
-        if pid == 0:
-            try:
-                # D2H: Move tensor from spyre to host memory pool
-                copy_tensor_raw(kv_page_tensor, pool, slot_id, to_device=False)
-                os._exit(0)
-            except Exception:
-                os._exit(1)
-
-        _, status = os.waitpid(pid, 0)
-        self.assertEqual(status, 0)
-
-        kv_page_tensor_reload = torch.empty_like(kv_page_tensor)
-
-        # H2D: Move tensor back from host memory pool to spyre
-        copy_tensor_raw(kv_page_tensor_reload, pool, slot_id, to_device=True)
-
-        # Verify that the tensor matches the original
-        self.assertTrue(
-            torch.equal(kv_page_tensor.to("cpu"), kv_page_tensor_reload.to("cpu"))
+        p = ctx.Process(
+            target=_reload_and_check,
+            args=(self.id(), tuple(kv_page_tensor.shape), slot_bytes, expected_cpu),
         )
+        p.start()
+        p.join(timeout=120)
+        if p.is_alive():
+            p.terminate()
+            p.join()
+            self.fail("child process timed out")
+        self.assertEqual(p.exitcode, 0)
 
 
 if __name__ == "__main__":
