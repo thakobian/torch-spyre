@@ -14,7 +14,8 @@
 
 
 import torch
-import os
+import multiprocessing as mp
+import sys
 
 from torch.testing._internal.common_utils import (
     TestCase,
@@ -26,6 +27,22 @@ from torch_spyre._C import (  # type: ignore[attr-defined]
     SharedHostPool,
     get_composite_address_handle,
 )
+
+
+def _attach_and_check(pool_name, slot_count, slot_bytes):
+    """
+    Helper function for multiprocessing work
+    """
+    from torch_spyre._C import (  # type: ignore[attr-defined]
+        SharedHostPool,
+    )
+
+    try:
+        SharedHostPool.create_or_attach(pool_name, slot_count + 1, slot_bytes)
+    except RuntimeError:
+        sys.exit(0)
+
+    sys.exit(1)
 
 
 class TestSharedHostPool(TestCase):
@@ -134,19 +151,19 @@ class TestSharedHostPool(TestCase):
         """
         Test two different processes creating and attaching to the same shared pool.
         """
+        ctx = mp.get_context("spawn")
+
         _ = SharedHostPool.create_or_attach("Testing", 5, 5)
 
-        pid = os.fork()
-        if pid == 0:
-            # Child process should throw a RuntimeError when trying to create a pool with different geometry
-            try:
-                SharedHostPool.create_or_attach("Testing", 10, 5)
-                os._exit(1)
-            except RuntimeError:
-                os._exit(0)
+        p = ctx.Process(target=_attach_and_check, args=("Testing", 5, 5))
+        p.start()
+        p.join(timeout=120)
+        if p.is_alive():
+            p.terminate()
+            p.join()
+            self.fail("Child process timed out")
 
-        _, status = os.waitpid(pid, 0)
-        self.assertEqual(status, 0)
+        self.assertEqual(p.exitcode, 0)
 
     def test_name(self):
         # Create a shared pool
