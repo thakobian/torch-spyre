@@ -19,6 +19,7 @@
 #include <ATen/ATen.h>
 #include <c10/core/Stream.h>
 
+#include <flex/memory_interface/shared_host_pool.hpp>
 #include <vector>
 
 #include "job_plan.h"
@@ -64,6 +65,9 @@ class SpyreStream {
   // conversion internally (no FillParams construction here).
   void fillAsync(const flex::CompositeAddress* dst, double value,
                  DataFormats dtype, bool use_dmai) const;
+  void copyRaw(const flex::SharedHostPool& pool, size_t slot_id,
+               const flex::CompositeAddress* device_address,
+               bool to_device) const;
 
   // Conversions
   c10::Stream unwrap() const;

@@ -38,6 +38,7 @@
 #include "logging.h"
 #include "module.h"
 #include "spyre_allocator.h"
+#include "spyre_composite_address.h"
 #include "spyre_storage_impl.h"
 #include "spyre_stream.h"
 #include "spyre_tensor_impl.h"
@@ -597,12 +598,10 @@ void copy_tensor_raw(const at::Tensor& dev_tensor,
   c10::Device device = dev_tensor.device();
   SpyreStream stream = getCurrentStream(device);
 
-  void* host_address = pool.slot_ptr(slot_id);
-
   const flex::CompositeAddress* composite_address =
       spyre::get_composite_address(dev_tensor);
 
-  stream.copyRaw(host_address, pool.slot_bytes(), composite_address, to_device);
+  stream.copyRaw(pool, slot_id, composite_address, to_device);
 
   if (!non_blocking) {
     stream.synchronize();
