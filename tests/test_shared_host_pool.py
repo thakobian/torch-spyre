@@ -29,22 +29,21 @@ from torch_spyre._C import (  # type: ignore[attr-defined]
 )
 
 
-def _attach_and_check(pool_name, slot_count, slot_bytes):
+def _check_shm_visible(pool_name, expected_total_bytes):
     """
-    Helper function for multiprocessing work
+    Confirm from a separate process that the pool's shared-memory segment is
+    visible with the expected size. This process opens no Spyre device: a single
+    VFIO device is held exclusively by the parent, so a second process cannot
+    attach through the runtime, but it can still see the shared host memory.
     """
-    from torch_spyre._C import (  # type: ignore[attr-defined]
-        SharedHostPool,
-    )
+    import os
 
     try:
-        SharedHostPool.create_or_attach(pool_name, slot_count + 1, slot_bytes)
-    except RuntimeError as e:
-        # A geometry mismatch proves the child attached to the parent's pool.
-        if "geometry mismatch" in str(e):
-            sys.exit(0)
+        size = os.stat(f"/dev/shm/{pool_name}").st_size
+    except FileNotFoundError:
+        sys.exit(1)
 
-    sys.exit(1)
+    sys.exit(0 if size == expected_total_bytes else 2)
 
 
 class TestSharedHostPool(TestCase):
@@ -151,13 +150,15 @@ class TestSharedHostPool(TestCase):
 
     def test_different_processes(self):
         """
-        Test two different processes creating and attaching to the same shared pool.
+        The pool created here must be visible as shared memory to a separate
+        process.
         """
+        # Held alive for the whole test so the segment stays mapped while the
+        # child inspects it.
+        pool = SharedHostPool.create_or_attach(self.id(), 5, 5)
+
         ctx = mp.get_context("spawn")
-
-        _ = SharedHostPool.create_or_attach(self.id(), 5, 5)
-
-        p = ctx.Process(target=_attach_and_check, args=(self.id(), 5, 5))
+        p = ctx.Process(target=_check_shm_visible, args=(self.id(), pool.total_bytes()))
         p.start()
         p.join(timeout=120)
         if p.is_alive():
