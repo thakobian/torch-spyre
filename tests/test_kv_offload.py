@@ -139,7 +139,7 @@ class TestSpyre(TestCase):
         ctx = mp.get_context("spawn")
 
         # Process one: offload into the pool, then release the device.
-        p = ctx.Process(target=_offload_and_leak, args=(name))
+        p = ctx.Process(target=_offload_and_leak, args=(name,))
         p.start()
         p.join(timeout=120)
         if p.is_alive():
