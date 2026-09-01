@@ -289,6 +289,7 @@ PYBIND11_MODULE(_C, m) {
       .def_static(
           "create_or_attach",
           [](const std::string& name, size_t num_slots, size_t slot_bytes) {
+            spyre::startRuntime();
             return flex::SharedHostPool::CreateOrAttach(
                 spyre::GlobalRuntime::get(), name, num_slots, slot_bytes);
           },

@@ -33,25 +33,20 @@ def _attach_and_check(pool_name, slot_count, slot_bytes):
     """
     Helper function for multiprocessing work
     """
-    import traceback
-
     from torch_spyre._C import (  # type: ignore[attr-defined]
         SharedHostPool,
     )
 
     try:
         SharedHostPool.create_or_attach(pool_name, slot_count + 1, slot_bytes)
-    except RuntimeError:
-        # Expected: attaching with mismatched geometry proves the child saw the
-        # parent's pool.
-        sys.exit(0)
-    except Exception:
-        traceback.print_exc()
-        sys.exit(3)
+    except RuntimeError as e:
+        # A geometry mismatch proves the child attached to the parent's pool.
+        # Any other RuntimeError (e.g. device open) must not be mistaken for it.
+        if "geometry mismatch" in str(e):
+            sys.exit(0)
+        raise
 
-    # No error raised: the child created a fresh pool instead of seeing the
-    # parent's, so cross-process sharing did not happen.
-    sys.exit(2)
+    sys.exit(1)
 
 
 class TestSharedHostPool(TestCase):
@@ -70,7 +65,7 @@ class TestSharedHostPool(TestCase):
 
     def test_create_or_attach(self):
         # Create a shared pool
-        shared_pool = SharedHostPool.create_or_attach("Testing", 5, 5)
+        shared_pool = SharedHostPool.create_or_attach(self.id(), 5, 5)
 
         # Check if slot count is as expected
         self.assertEqual(shared_pool.slot_count(), 5)
@@ -81,25 +76,25 @@ class TestSharedHostPool(TestCase):
 
     def test_attach_existing_pool(self):
         # Create a shared pool and assign to _ to keep it alive
-        _ = SharedHostPool.create_or_attach("Testing", 5, 5)
+        _ = SharedHostPool.create_or_attach(self.id(), 5, 5)
 
         # Attach to the existing shared pool
-        shared_pool_compare = SharedHostPool.create_or_attach("Testing", 5, 5)
+        shared_pool_compare = SharedHostPool.create_or_attach(self.id(), 5, 5)
 
         self.assertEqual(shared_pool_compare.slot_count(), 5)
         self.assertGreaterEqual(shared_pool_compare.slot_bytes(), 5)
 
     def test_geometry_mismatch(self):
         # Create a shared pool and assign to _ to keep it alive
-        _ = SharedHostPool.create_or_attach("Testing", 5, 5)
+        _ = SharedHostPool.create_or_attach(self.id(), 5, 5)
 
         # Attempt to attach to the existing shared pool with different geometry
         with self.assertRaises(RuntimeError):
-            SharedHostPool.create_or_attach("Testing", 10, 10)
+            SharedHostPool.create_or_attach(self.id(), 10, 10)
 
     def test_no_host_pointer(self):
         # Create a shared pool
-        shared_pool = SharedHostPool.create_or_attach("Testing", 5, 5)
+        shared_pool = SharedHostPool.create_or_attach(self.id(), 5, 5)
 
         # Confirm that the shared pool does not have a host pointer attribute
         self.assertFalse(hasattr(shared_pool, "slot_ptr"))
@@ -128,7 +123,7 @@ class TestSharedHostPool(TestCase):
         # Choosing common prompt length of 8192 (tokens) for testing
         slot_count = 8192 // block_size
 
-        SharedHostPool.create_or_attach("Testing", int(slot_count), int(slot_bytes))
+        SharedHostPool.create_or_attach(self.id(), int(slot_count), int(slot_bytes))
 
     def test_pool_real_model_large_slot(self):
         """
@@ -154,7 +149,7 @@ class TestSharedHostPool(TestCase):
         # Choosing common prompt length of 8192 (tokens) for testing
         slot_count = 8192 // block_size
 
-        SharedHostPool.create_or_attach("Testing", int(slot_count), int(slot_bytes))
+        SharedHostPool.create_or_attach(self.id(), int(slot_count), int(slot_bytes))
 
     def test_different_processes(self):
         """
@@ -162,9 +157,9 @@ class TestSharedHostPool(TestCase):
         """
         ctx = mp.get_context("spawn")
 
-        _ = SharedHostPool.create_or_attach("Testing", 5, 5)
+        _ = SharedHostPool.create_or_attach(self.id(), 5, 5)
 
-        p = ctx.Process(target=_attach_and_check, args=("Testing", 5, 5))
+        p = ctx.Process(target=_attach_and_check, args=(self.id(), 5, 5))
         p.start()
         p.join(timeout=120)
         if p.is_alive():
@@ -172,23 +167,18 @@ class TestSharedHostPool(TestCase):
             p.join()
             self.fail("Child process timed out")
 
-        reason = {
-            0: "shared correctly",
-            2: "child created a fresh pool (did not see parent's)",
-            3: "child raised an unexpected exception (see traceback above)",
-        }.get(p.exitcode, f"child exited {p.exitcode}")
-        self.assertEqual(p.exitcode, 0, reason)
+        self.assertEqual(p.exitcode, 0)
 
     def test_name(self):
         # Create a shared pool
-        shared_pool = SharedHostPool.create_or_attach("Testing", 5, 5)
+        shared_pool = SharedHostPool.create_or_attach(self.id(), 5, 5)
 
         # Check if name is as expected
-        self.assertEqual(shared_pool.name(), "Testing")
+        self.assertEqual(shared_pool.name(), self.id())
 
     def test_total_bytes(self):
         # Create a shared pool
-        shared_pool = SharedHostPool.create_or_attach("Testing", 5, 5)
+        shared_pool = SharedHostPool.create_or_attach(self.id(), 5, 5)
 
         # Check if total bytes are as expected
         self.assertEqual(
