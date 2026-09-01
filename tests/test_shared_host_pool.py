@@ -41,10 +41,8 @@ def _attach_and_check(pool_name, slot_count, slot_bytes):
         SharedHostPool.create_or_attach(pool_name, slot_count + 1, slot_bytes)
     except RuntimeError as e:
         # A geometry mismatch proves the child attached to the parent's pool.
-        # Any other RuntimeError (e.g. device open) must not be mistaken for it.
         if "geometry mismatch" in str(e):
             sys.exit(0)
-        raise
 
     sys.exit(1)
 
