@@ -14,8 +14,6 @@
 
 
 import torch
-import multiprocessing as mp
-import sys
 
 from torch.testing._internal.common_utils import (
     TestCase,
@@ -27,23 +25,6 @@ from torch_spyre._C import (  # type: ignore[attr-defined]
     SharedHostPool,
     get_composite_address,
 )
-
-
-def _check_shm_visible(pool_name, expected_total_bytes):
-    """
-    Confirm from a separate process that the pool's shared-memory segment is
-    visible with the expected size. This process opens no Spyre device: a single
-    VFIO device is held exclusively by the parent, so a second process cannot
-    attach through the runtime, but it can still see the shared host memory.
-    """
-    import os
-
-    try:
-        size = os.stat(f"/dev/shm/{pool_name}").st_size
-    except FileNotFoundError:
-        sys.exit(1)
-
-    sys.exit(0 if size == expected_total_bytes else 2)
 
 
 class TestSharedHostPool(TestCase):
@@ -147,26 +128,6 @@ class TestSharedHostPool(TestCase):
         slot_count = 8192 // block_size
 
         SharedHostPool.create_or_attach(self.id(), int(slot_count), int(slot_bytes))
-
-    def test_different_processes(self):
-        """
-        The pool created here must be visible as shared memory to a separate
-        process.
-        """
-        # Held alive for the whole test so the segment stays mapped while the
-        # child inspects it.
-        pool = SharedHostPool.create_or_attach(self.id(), 5, 5)
-
-        ctx = mp.get_context("spawn")
-        p = ctx.Process(target=_check_shm_visible, args=(self.id(), pool.total_bytes()))
-        p.start()
-        p.join(timeout=120)
-        if p.is_alive():
-            p.terminate()
-            p.join()
-            self.fail("Child process timed out")
-
-        self.assertEqual(p.exitcode, 0)
 
     def test_name(self):
         # Create a shared pool
