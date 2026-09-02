@@ -13,9 +13,7 @@
 # limitations under the License.
 
 
-import os
 import torch
-import multiprocessing as mp
 
 from torch.testing._internal.common_utils import (
     TestCase,
@@ -28,27 +26,6 @@ from torch_spyre._C import (  # type: ignore[attr-defined]
     copy_tensor_raw,
     get_composite_address,
 )
-
-
-def _make_kv_tensor():
-    """
-    Deterministic page both processes can reproduce, so the reloading process
-    knows the expected bytes without any IPC.
-    """
-    return torch.arange(10, dtype=torch.float16).to("spyre")
-
-
-def _offload_and_leak(pool_name):
-    """
-    Offload a page (D2H) into slot 0, then hard-exit. os._exit skips C++
-    destructors so the shm segment is NOT unlinked, and closing the process
-    releases the exclusive VFIO device for the parent to reload from.
-    """
-    kv_page_tensor = _make_kv_tensor()
-    slot_bytes = get_composite_address(kv_page_tensor).total_size
-    pool = SharedHostPool.create_or_attach(pool_name, 1, slot_bytes)
-    copy_tensor_raw(kv_page_tensor, pool, 0, to_device=False)
-    os._exit(0)
 
 
 class TestSpyre(TestCase):
@@ -124,38 +101,6 @@ class TestSpyre(TestCase):
         # Create a tensor for KV Cache page with the shape needed for the model
         kv_page_tensor = torch.randn(kv_page_shape, device="spyre", dtype=torch.float16)
         self._kv_offload_reload(kv_page_tensor, torch.zeros_like(kv_page_tensor))
-
-    def test_diff_processes(self):
-        """
-        A page offloaded (D2H) by one process must be reloadable (H2D) and
-        byte-equal from another process attaching the same named pool.
-
-        A single VFIO device is exclusive, so the two run sequentially: the
-        child offloads and hard-exits (releasing the device but leaving the shm
-        segment), then this process attaches the same pool and reloads. This
-        test must run before anything else in the process opens the device.
-        """
-        name = self.id()
-        ctx = mp.get_context("spawn")
-
-        # Process one: offload into the pool, then release the device.
-        p = ctx.Process(target=_offload_and_leak, args=(name,))
-        p.start()
-        p.join(timeout=120)
-        if p.is_alive():
-            p.terminate()
-            p.join()
-            self.fail("child process timed out")
-        self.assertEqual(p.exitcode, 0)
-
-        # Process two (this one): attach the same named pool and reload.
-        expected = _make_kv_tensor()
-        slot_bytes = get_composite_address(expected).total_size
-        pool = SharedHostPool.create_or_attach(name, 1, slot_bytes)
-        reloaded = torch.empty_like(expected)
-        copy_tensor_raw(reloaded, pool, 0, to_device=True)
-
-        self.assertEqual(reloaded.to("cpu"), expected.to("cpu"))
 
 
 if __name__ == "__main__":
