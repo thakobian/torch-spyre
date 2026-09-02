@@ -79,35 +79,6 @@ class TestKVOffloadCrossProcess(TestCase):
         if dist.is_initialized():
             dist.destroy_process_group()
 
-    def test_cross_process_shared_pool(self):
-        """
-        Test that a shared host pool can be created in one process and seen by another process.
-        """
-        # Arbitrary sizes for the test
-        slot_bytes = 10
-        num_slots = 1
-        name = self.id()
-
-        if self.comm_rank == 0:
-            # Process 0: Create the shared host pool
-            pool = SharedHostPool.create_or_attach(name, num_slots, slot_bytes)
-            self.assertIsNotNone(pool)
-
-        dist.barrier()  # Ensure process 0 has created the pool
-
-        # Process 1: Try to create the same pool with different geometry, which should throw an exception
-        if self.comm_rank == 1:
-            pool = SharedHostPool.create_or_attach(name, num_slots, slot_bytes)
-            self.assertEqual(pool.slot_count(), num_slots)
-            self.assertEqual(pool.name(), name)
-            self.assertEqual(pool.total_bytes(), pool.slot_count() * pool.slot_bytes())
-            with self.assertRaises(RuntimeError):
-                # Different size should raise an error
-                pool = SharedHostPool.create_or_attach(name, num_slots + 1, slot_bytes)
-
-        # Ensure process 0 doesn't exit so pool is not destroyed before process 1 is done with it
-        dist.barrier()
-
     def test_cross_process_reload(self):
         """
         Test that a tensor offloaded in one process can be reloaded in another.

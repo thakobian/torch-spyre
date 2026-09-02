@@ -19,8 +19,8 @@
 #include <ATen/ATen.h>
 #include <c10/core/Stream.h>
 
-#include <flex/memory_interface/shared_host_pool.hpp>
 #include <cstdint>
+#include <flex/memory_interface/shared_host_pool.hpp>
 #include <memory>
 #include <vector>
 
