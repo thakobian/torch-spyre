@@ -38,6 +38,7 @@
 #include "logging.h"
 #include "module.h"
 #include "spyre_allocator.h"
+#include "spyre_composite_address.h"
 #include "spyre_storage_impl.h"
 #include "spyre_stream.h"
 #include "spyre_tensor_impl.h"
@@ -597,6 +598,22 @@ at::Tensor& spyre_set_storage(at::Tensor& result, at::Storage storage,
                               c10::IntArrayRef stride) {
   DEBUGINFO("set method");
   return at::cpu::set_(result, storage, storage_offset, size, stride);
+}
+
+void copy_tensor_raw(const at::Tensor& dev_tensor,
+                     const flex::SharedHostPool& pool, size_t slot_id,
+                     bool to_device, bool non_blocking) {
+  c10::Device device = dev_tensor.device();
+  SpyreStream stream = getCurrentStream(device);
+
+  const flex::CompositeAddress* composite_address =
+      spyre::get_composite_address(dev_tensor);
+
+  stream.copyRaw(pool, slot_id, composite_address, to_device);
+
+  if (!non_blocking) {
+    stream.synchronize();
+  }
 }
 
 /**
