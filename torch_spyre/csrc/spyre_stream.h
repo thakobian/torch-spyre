@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <flex/memory_interface/shared_host_pool.hpp>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "job_plan.h"
@@ -68,8 +69,8 @@ class SpyreStream {
   void fillAsync(const flex::CompositeAddress* dst, double value,
                  DataFormats dtype, bool use_dmai) const;
   void copyRaw(const flex::SharedHostPool& pool, size_t slot_id,
-               const flex::CompositeAddress* device_address,
-               bool to_device) const;
+               const flex::CompositeAddress* device_address, bool to_device,
+               std::optional<flex::Range> range = std::nullopt) const;
 
   // Conversions
   c10::Stream unwrap() const;

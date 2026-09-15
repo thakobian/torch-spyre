@@ -606,10 +606,14 @@ void copy_tensor_raw(const at::Tensor& dev_tensor,
   c10::Device device = dev_tensor.device();
   SpyreStream stream = getCurrentStream(device);
 
+  size_t offset = dev_tensor.storage_offset() * dev_tensor.element_size();
+  size_t length = dev_tensor.numel() * dev_tensor.element_size();
+
   const flex::CompositeAddress* composite_address =
       spyre::get_composite_address(dev_tensor);
 
-  stream.copyRaw(pool, slot_id, composite_address, to_device);
+  stream.copyRaw(pool, slot_id, composite_address, to_device,
+                 flex::Range(offset, length));
 
   if (!non_blocking) {
     stream.synchronize();
