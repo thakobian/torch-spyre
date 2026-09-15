@@ -102,6 +102,29 @@ class TestSpyre(TestCase):
         kv_page_tensor = torch.randn(kv_page_shape, device="spyre", dtype=torch.float16)
         self._kv_offload_reload(kv_page_tensor, torch.zeros_like(kv_page_tensor))
 
+    def test_page_view_offload(self):
+        """
+        Offload one page of a multi page cache then reload to see if it correctly
+        survives d2h and h2d transfers.
+        """
+        # 4 pages of 64 fp16 elements. One page is a 128 byte stick.
+        cache = torch.arange(4 * 64, device="spyre", dtype=torch.float16).reshape(4, 64)
+        page = cache[2]
+
+        slot_bytes = page.numel() * page.element_size()
+        pool = SharedHostPool.create_or_attach(
+            self.id(), num_slots=1, slot_bytes=slot_bytes
+        )
+
+        # D2H: only page 2 should land in slot 0
+        copy_tensor_raw(page, pool, 0, to_device=False)
+
+        # H2D: read the page back to a empty tensor
+        reloaded = torch.empty_like(page)
+        copy_tensor_raw(reloaded, pool, 0, to_device=True)
+
+        self.assertEqual(page.to("cpu"), reloaded.to("cpu"))
+
 
 if __name__ == "__main__":
     run_tests()

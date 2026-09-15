@@ -277,8 +277,10 @@ void SpyreStream::fillAsync(const flex::CompositeAddress* dst, double value,
 
 void SpyreStream::copyRaw(const flex::SharedHostPool& pool, size_t slot_id,
                           const flex::CompositeAddress* device_address,
-                          bool to_device) const {
-  resolveRuntimeHandle()->copyRaw(pool, slot_id, device_address, to_device);
+                          bool to_device,
+                          std::optional<flex::Range> range) const {
+  resolveRuntimeHandle()->copyRaw(pool, slot_id, device_address, to_device,
+                                  range);
 }
 
 void SpyreStream::launch(const JobPlan& plan,
