@@ -286,7 +286,13 @@ PYBIND11_MODULE(_C, m) {
 
   py::class_<spyre::SpyreTensorLayout> dci_cls(m, "SpyreTensorLayout");
 
-  py::class_<flex::SharedHostPool>(m, "SharedHostPool")
+  py::class_<flex::SharedPool>(m, "SharedPool")
+      .def("slot_count", &flex::SharedPool::SlotCount)
+      .def("slot_bytes", &flex::SharedPool::SlotBytes)
+      .def("name", &flex::SharedPool::Name)
+      .def("total_bytes", &flex::SharedPool::TotalBytes);
+
+  py::class_<flex::SharedHostPool, flex::SharedPool>(m, "SharedHostPool")
       .def_static(
           "create_or_attach",
           [](const std::string& name, size_t num_slots, size_t slot_bytes) {
@@ -296,11 +302,7 @@ PYBIND11_MODULE(_C, m) {
           },
           py::arg("name"), py::arg("num_slots"), py::arg("slot_bytes"))
       .def_static("unlink_by_name", &flex::SharedHostPool::UnlinkByName,
-                  py::arg("name"))
-      .def("slot_count", &flex::SharedHostPool::SlotCount)
-      .def("slot_bytes", &flex::SharedHostPool::SlotBytes)
-      .def("name", &flex::SharedHostPool::Name)
-      .def("total_bytes", &flex::SharedHostPool::TotalBytes);
+                  py::arg("name"));
 
   dci_cls.def_readonly("device_size", &spyre::SpyreTensorLayout::device_size)
       .def_readonly("stride_map", &spyre::SpyreTensorLayout::stride_map)
