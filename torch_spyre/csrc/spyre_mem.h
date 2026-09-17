@@ -34,9 +34,8 @@ at::Tensor spyre_empty_strided(c10::IntArrayRef size, c10::IntArrayRef stride,
 at::Tensor spyre_copy_from(const at::Tensor& self, const at::Tensor& dst,
                            bool non_blocking);
 
-void copy_tensor_raw(const at::Tensor& dev_tensor,
-                     const flex::SharedHostPool& pool, size_t slot_id,
-                     bool to_device, bool non_blocking = false);
+void copy_tensor_raw(const at::Tensor& dev_tensor, const flex::SharedPool& pool,
+                     size_t slot_id, bool to_device, bool non_blocking = false);
 
 /**
  * Fill a spyre tensor with a scalar value using device-side FillDMA.

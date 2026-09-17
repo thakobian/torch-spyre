@@ -443,7 +443,8 @@ PYBIND11_MODULE(_C, m) {
   m.def("copy_tensor_raw", &spyre::copy_tensor_raw,
         "Copy tensor between host and device, either way, using DMA",
         py::arg("dev_tensor"), py::arg("pool"), py::arg("slot_id"),
-        py::arg("to_device"), py::arg("non_blocking") = false);
+        py::arg("to_device"), py::arg("non_blocking") = false,
+        py::call_guard<py::gil_scoped_release>());
 
   // Device-side fill using FillDMA (no host buffer or H2D copy)
   m.def("fill_tensor", &spyre::spyre_fill_tensor,

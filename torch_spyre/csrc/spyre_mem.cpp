@@ -600,9 +600,8 @@ at::Tensor& spyre_set_storage(at::Tensor& result, at::Storage storage,
   return at::cpu::set_(result, storage, storage_offset, size, stride);
 }
 
-void copy_tensor_raw(const at::Tensor& dev_tensor,
-                     const flex::SharedHostPool& pool, size_t slot_id,
-                     bool to_device, bool non_blocking) {
+void copy_tensor_raw(const at::Tensor& dev_tensor, const flex::SharedPool& pool,
+                     size_t slot_id, bool to_device, bool non_blocking) {
   c10::Device device = dev_tensor.device();
   SpyreStream stream = getCurrentStream(device);
 
