@@ -611,6 +611,11 @@ void copy_tensor_raw(const at::Tensor& dev_tensor, const flex::SharedPool& pool,
   const flex::CompositeAddress* composite_address =
       spyre::get_composite_address(dev_tensor);
 
+  TORCH_CHECK(offset % flex::DEVICE_ALIGNMENT == 0 &&
+                  length % flex::DEVICE_ALIGNMENT == 0,
+              "copy_tensor_raw: subrange must be 128-byte aligned, got offset=",
+              offset, " length=", length);
+
   stream.copyRaw(pool, slot_id, composite_address, to_device,
                  flex::Range(offset, length));
 
