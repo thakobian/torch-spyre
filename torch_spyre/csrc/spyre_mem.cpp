@@ -600,6 +600,33 @@ at::Tensor& spyre_set_storage(at::Tensor& result, at::Storage storage,
   return at::cpu::set_(result, storage, storage_offset, size, stride);
 }
 
+std::optional<flex::Range> get_device_range(const at::Tensor& dev_tensor) {
+  // Get the physical layout of the tensor on the device and its bytes which
+  // will include padding.
+  SpyreTensorLayout layout = spyre::get_spyre_tensor_layout(layout);
+  size_t total_bytes = spyre::get_device_size_in_bytes(layout);
+
+  size_t rows = layout.device_size[0];
+  size_t row_elems = layout.stride_map[0];
+
+  // Get which element into this storage the tensor/view starts
+  size_t offset_range = dev_tensor.storage_offset();
+
+  // Get how many bytes each row has
+  size_t row_bytes = total_bytes / rows;
+
+  // Check the offset in terms of bytes
+  size_t offset_bytes = (offset_elems / row_elems) * row_bytes;
+
+  // Check how many rows the view spans
+  size_t span_row = (dev_tensor.numel() + row_elems - 1) / row_elems;
+
+  // Measure how many sticks/rows we need in bytes
+  size_t length_bytes = span_rows * row_bytes;
+
+  return flex::Range(offset_bytes, length_bytes);
+}
+
 void copy_tensor_raw(const at::Tensor& dev_tensor, const flex::SharedPool& pool,
                      size_t slot_id, bool to_device, bool non_blocking) {
   c10::Device device = dev_tensor.device();
