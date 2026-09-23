@@ -30,6 +30,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -600,17 +601,41 @@ at::Tensor& spyre_set_storage(at::Tensor& result, at::Storage storage,
   return at::cpu::set_(result, storage, storage_offset, size, stride);
 }
 
+namespace {
+
+/**
+ * Compute the physical byte range a tensor or view occupies in its device
+ * allocation.
+ * Deriving the range from device_size keeps the padding in the
+ * arithmetic. Returns nullopt for a view that does not start on a row
+ * boundary, which cannot be expressed as a contiguous device range.
+ */
 std::optional<flex::Range> get_device_range(const at::Tensor& dev_tensor) {
   // Get the physical layout of the tensor on the device and its bytes which
   // will include padding.
-  SpyreTensorLayout layout = spyre::get_spyre_tensor_layout(layout);
+  SpyreTensorLayout layout = spyre::get_spyre_tensor_layout(dev_tensor);
   size_t total_bytes = spyre::get_device_size_in_bytes(layout);
+
+  // A leading dimension of size 1 records no stride, and a zero size tensor
+  // has no rows, so the whole allocation is the only range we can describe.
+  if (layout.device_size[0] == 0 || layout.stride_map[0] <= 0) {
+    if (dev_tensor.storage_offset() != 0) {
+      return std::nullopt;
+    }
+    return flex::Range(0, total_bytes);
+  }
 
   size_t rows = layout.device_size[0];
   size_t row_elems = layout.stride_map[0];
 
   // Get which element into this storage the tensor/view starts
-  size_t offset_range = dev_tensor.storage_offset();
+  size_t offset_elems = dev_tensor.storage_offset();
+
+  // Take modulo of where offset begins by stride to make sure offset begins at
+  // row boundary
+  if (offset_elems % row_elems != 0) {
+    return std::nullopt;
+  }
 
   // Get how many bytes each row has
   size_t row_bytes = total_bytes / rows;
@@ -619,32 +644,34 @@ std::optional<flex::Range> get_device_range(const at::Tensor& dev_tensor) {
   size_t offset_bytes = (offset_elems / row_elems) * row_bytes;
 
   // Check how many rows the view spans
-  size_t span_row = (dev_tensor.numel() + row_elems - 1) / row_elems;
+  size_t span_rows = (dev_tensor.numel() + row_elems - 1) / row_elems;
 
   // Measure how many sticks/rows we need in bytes
   size_t length_bytes = span_rows * row_bytes;
 
   return flex::Range(offset_bytes, length_bytes);
 }
+}  // namespace
 
 void copy_tensor_raw(const at::Tensor& dev_tensor, const flex::SharedPool& pool,
                      size_t slot_id, bool to_device, bool non_blocking) {
   c10::Device device = dev_tensor.device();
   SpyreStream stream = getCurrentStream(device);
 
-  size_t offset = dev_tensor.storage_offset() * dev_tensor.element_size();
-  size_t length = dev_tensor.numel() * dev_tensor.element_size();
-
   const flex::CompositeAddress* composite_address =
       spyre::get_composite_address(dev_tensor);
 
-  TORCH_CHECK(offset % flex::DEVICE_ALIGNMENT == 0 &&
-                  length % flex::DEVICE_ALIGNMENT == 0,
-              "copy_tensor_raw: subrange must be 128-byte aligned, got offset=",
-              offset, " length=", length);
+  std::optional<flex::Range> range = get_device_range(dev_tensor);
+  TORCH_CHECK(range.has_value(),
+              "copy_tensor_raw: view does not start on a device row boundary, "
+              "got storage_offset=",
+              dev_tensor.storage_offset(), " numel=", dev_tensor.numel());
 
-  stream.copyRaw(pool, slot_id, composite_address, to_device,
-                 flex::Range(offset, length));
+  if (range->offset == 0 && range->length == composite_address->total_size()) {
+    stream.copyRaw(pool, slot_id, composite_address, to_device);
+  } else {
+    stream.copyRaw(pool, slot_id, composite_address, to_device, *range);
+  }
 
   if (!non_blocking) {
     stream.synchronize();
