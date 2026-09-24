@@ -21,8 +21,11 @@ from torch.testing._internal.common_utils import TestCase, run_tests
 
 from torch_spyre._C import (  # type: ignore[attr-defined]
     SharedHostPool,
-    copy_tensor_raw,
+    SpyreTensorLayout,
+    copy_kv_page_raw,
     get_composite_address,
+    get_device_dtype,
+    get_elem_in_stick,
 )
 
 
@@ -55,6 +58,43 @@ except ValueError:
 DEVICE = torch.device(f"spyre:{os.getenv('RANK', '0')}")
 C10D_BACKEND = "spyreccl"
 
+# Geometry from ibm-ai-platform/micro-g3.3-8b-instruct-1b config.json.
+# head_dim is hidden_size 4096 / num_attention_heads 32.
+NUM_KV_HEADS = 8
+HEAD_DIM = 128
+NUM_BLOCKS = 4
+BLOCK_SIZE = 16
+BLOCK_ID = 1
+
+
+def slot_major_layout(num_slots, num_kv_heads, head_size, dtype=torch.float16):
+    """Mirror of spyre-inference slot_major_kv_layout, which is how the real
+    decoder cache is allocated. The slot axis is outermost, so each page is one
+    contiguous physical range. stride_map is row major over device_size, which
+    is what copy_kv_page_raw requires.
+    """
+    eps = get_elem_in_stick(dtype)
+    sticks = (head_size + eps - 1) // eps
+    return SpyreTensorLayout(
+        device_size=[num_slots, num_kv_heads, sticks, eps],
+        stride_map=[num_kv_heads * sticks * eps, sticks * eps, eps, 1],
+        device_dtype=get_device_dtype(dtype),
+    )
+
+
+def make_cache(kv_cache_shape, fill_data):
+    """Allocate a KV cache with the production layout. Host allocated then
+    transferred, since only .to() accepts a device_layout.
+    """
+    num_blocks, block_size, num_kv_heads, head_dim = kv_cache_shape
+    layout = slot_major_layout(num_blocks * block_size, num_kv_heads, head_dim)
+    host_cache = torch.zeros(kv_cache_shape, dtype=torch.float16)
+    if fill_data:
+        # Each page holds its own index so both ranks build the same data.
+        for block in range(num_blocks):
+            host_cache[block] = block + 1
+    return host_cache.to(DEVICE, device_layout=layout)
+
 
 class TestKVOffloadCrossProcess(TestCase):
     @classmethod
@@ -79,31 +119,36 @@ class TestKVOffloadCrossProcess(TestCase):
         if dist.is_initialized():
             dist.destroy_process_group()
 
+    def _pool(self, cache, num_blocks):
+        page_bytes = get_composite_address(cache).total_size // num_blocks
+        return SharedHostPool.create_or_attach(
+            self.id(), num_slots=1, slot_bytes=page_bytes
+        )
+
     def test_cross_process_reload(self):
         """
-        Test that a tensor offloaded in one process can be reloaded in another.
+        Test that a KV page offloaded in one process can be reloaded in another.
         """
-
-        expected_tensor = torch.arange(10, device=DEVICE, dtype=torch.float16)
-        num_slots = 1
-        slot_bytes = get_composite_address(expected_tensor).total_size
-        name = self.id()
+        kv_cache_shape = (NUM_BLOCKS, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM)
+        cache = make_cache(kv_cache_shape, fill_data=True)
 
         if self.comm_rank == 0:
-            # Process 0: Offload the tensor to the shared host pool
-            pool = SharedHostPool.create_or_attach(name, num_slots, slot_bytes)
-            copy_tensor_raw(expected_tensor, pool, 0, to_device=False)
+            # Process 0: Offload one page to the shared host pool
+            pool = self._pool(cache, NUM_BLOCKS)
+            copy_kv_page_raw(cache, BLOCK_ID, pool, 0, to_device=False)
 
         dist.barrier()  # Ensure process 0 has completed offloading
 
-        # Process 1: Reload the tensor from the shared host pool
+        # Process 1: Reload the page from the shared host pool
         if self.comm_rank == 1:
-            pool = SharedHostPool.create_or_attach(name, num_slots, slot_bytes)
-            reloaded_tensor = torch.empty_like(expected_tensor)
-            copy_tensor_raw(reloaded_tensor, pool, 0, to_device=True)
+            pool = self._pool(cache, NUM_BLOCKS)
+            reloaded_cache = make_cache(kv_cache_shape, fill_data=False)
+            copy_kv_page_raw(reloaded_cache, BLOCK_ID, pool, 0, to_device=True)
 
-            # Verify that the reloaded tensor matches the expected tensor
-            self.assertEqual(expected_tensor.to("cpu"), reloaded_tensor.to("cpu"))
+            # Verify that the reloaded page matches the expected one
+            self.assertEqual(
+                reloaded_cache.to("cpu")[BLOCK_ID], cache.to("cpu")[BLOCK_ID]
+            )
 
         # Ensure process 0 doesn't exit so pool is not destroyed before process 1 is done with it
         dist.barrier()
