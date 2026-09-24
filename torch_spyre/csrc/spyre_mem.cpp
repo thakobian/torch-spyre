@@ -602,76 +602,88 @@ at::Tensor& spyre_set_storage(at::Tensor& result, at::Storage storage,
 }
 
 namespace {
-
 /**
- * Compute the physical byte range a tensor or view occupies in its device
- * allocation.
- * Deriving the range from device_size keeps the padding in the
- * arithmetic. Returns nullopt for a view that does not start on a row
- * boundary, which cannot be expressed as a contiguous device range.
+ * Derive the physical byte range of one KV page based on the block_id provided.
  */
-std::optional<flex::Range> get_device_range(const at::Tensor& dev_tensor) {
-  // Get the physical layout of the tensor on the device and its bytes which
-  // will include padding.
-  SpyreTensorLayout layout = spyre::get_spyre_tensor_layout(dev_tensor);
-  size_t total_bytes = spyre::get_device_size_in_bytes(layout);
+flex::Range derive_kv_page_range(const at::Tensor& cache, size_t block_id) {
+  const SpyreTensorLayout layout = get_spyre_tensor_layout(cache);
+  const std::vector<int64_t>& device_size = layout.device_size;
 
-  // A leading dimension of size 1 records no stride, and a zero size tensor
-  // has no rows, so the whole allocation is the only range we can describe.
-  if (layout.device_size[0] == 0 || layout.stride_map[0] <= 0) {
-    if (dev_tensor.storage_offset() != 0) {
-      return std::nullopt;
-    }
-    return flex::Range(0, total_bytes);
+  TORCH_CHECK(cache.dim() == 4,
+              "copy_kv_page_raw: expected a rank 4 KV cache, got rank ",
+              cache.dim());
+
+  TORCH_CHECK(device_size.size() == 4,
+              "copy_kv_page_raw: expected a rank 4 device layout, got rank ",
+              device_size.size(),
+              ". A generic tiled layout is not a supported KV cache, allocate "
+              "with slot_major_kv_layout");
+
+  const int64_t num_blocks = cache.size(0);
+  const int64_t head_size = cache.size(3);
+  const int64_t elems_per_stick = device_size[3];
+
+  TORCH_CHECK(head_size % elems_per_stick == 0, "copy_kv_page_raw: head_size ",
+              head_size, " is not a multiple of the stick width ",
+              elems_per_stick,
+              ", the device image is padded and one range cannot describe a "
+              "page");
+
+  // Strides must be row major over device_size, which is what makes a page one
+  // contiguous interval. The default generated layout reorders dimensions.
+  int64_t expected_stride = 1;
+  for (int i = 3; i >= 0; i--) {
+    TORCH_CHECK(layout.stride_map[i] == expected_stride,
+                "copy_kv_page_raw: device layout is not row major at dim ", i,
+                ", a page is not one contiguous interval");
+    expected_stride *= device_size[i];
   }
 
-  size_t rows = layout.device_size[0];
-  size_t row_elems = layout.stride_map[0];
+  TORCH_CHECK(num_blocks > 0, "copy_kv_page_raw: cache has no pages");
+  // Device dim 0 folds page and inner extent, block_size for token major or
+  // kv heads for head major. Exact, not divisible: a prefix view like
+  // cache[0:2] keeps the full cache's layout while reporting a smaller
+  // size(0), so page_bytes would come out a multiple too large.
+  TORCH_CHECK(device_size[0] == num_blocks * cache.size(1) ||
+                  device_size[0] == num_blocks * cache.size(2),
+              "copy_kv_page_raw: device dim 0 (", device_size[0],
+              ") does not fold ", num_blocks,
+              " pages. Pass a whole cache, not a view of one");
 
-  // Get which element into this storage the tensor/view starts
-  size_t offset_elems = dev_tensor.storage_offset();
+  TORCH_CHECK(cache.storage_offset() == 0,
+              "copy_kv_page_raw: pass the full cache and a block_id, not a "
+              "page view. Got storage_offset ",
+              cache.storage_offset());
+  TORCH_CHECK(static_cast<int64_t>(block_id) < num_blocks,
+              "copy_kv_page_raw: block_id ", block_id, " out of range [0, ",
+              num_blocks, ")");
 
-  // Take modulo of where offset begins by stride to make sure offset begins at
-  // row boundary
-  if (offset_elems % row_elems != 0) {
-    return std::nullopt;
-  }
+  const size_t total_bytes = get_device_size_in_bytes(layout);
+  const size_t page_bytes = total_bytes / static_cast<size_t>(num_blocks);
+  const size_t page_offset = block_id * page_bytes;
 
-  // Get how many bytes each row has
-  size_t row_bytes = total_bytes / rows;
+  TORCH_CHECK(page_offset % flex::DEVICE_ALIGNMENT == 0 &&
+                  page_bytes % flex::DEVICE_ALIGNMENT == 0,
+              "copy_kv_page_raw: page range must be ", flex::DEVICE_ALIGNMENT,
+              " byte aligned, got offset=", page_offset,
+              " length=", page_bytes);
 
-  // Check the offset in terms of bytes
-  size_t offset_bytes = (offset_elems / row_elems) * row_bytes;
-
-  // Check how many rows the view spans
-  size_t span_rows = (dev_tensor.numel() + row_elems - 1) / row_elems;
-
-  // Measure how many sticks/rows we need in bytes
-  size_t length_bytes = span_rows * row_bytes;
-
-  return flex::Range(offset_bytes, length_bytes);
+  return flex::Range(page_offset, page_bytes);
 }
 }  // namespace
 
-void copy_tensor_raw(const at::Tensor& dev_tensor, const flex::SharedPool& pool,
-                     size_t slot_id, bool to_device, bool non_blocking) {
-  c10::Device device = dev_tensor.device();
+void copy_kv_page_raw(const at::Tensor& cache, size_t block_id,
+                      const flex::SharedPool& pool, size_t slot_id,
+                      bool to_device, bool non_blocking) {
+  c10::Device device = cache.device();
   SpyreStream stream = getCurrentStream(device);
 
   const flex::CompositeAddress* composite_address =
-      spyre::get_composite_address(dev_tensor);
+      spyre::get_composite_address(cache);
 
-  std::optional<flex::Range> range = get_device_range(dev_tensor);
-  TORCH_CHECK(range.has_value(),
-              "copy_tensor_raw: view does not start on a device row boundary, "
-              "got storage_offset=",
-              dev_tensor.storage_offset(), " numel=", dev_tensor.numel());
+  const flex::Range range = derive_kv_page_range(cache, block_id);
 
-  if (range->offset == 0 && range->length == composite_address->total_size()) {
-    stream.copyRaw(pool, slot_id, composite_address, to_device);
-  } else {
-    stream.copyRaw(pool, slot_id, composite_address, to_device, *range);
-  }
+  stream.copyRaw(pool, slot_id, composite_address, to_device, range);
 
   if (!non_blocking) {
     stream.synchronize();
