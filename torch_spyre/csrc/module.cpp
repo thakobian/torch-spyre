@@ -421,11 +421,12 @@ PYBIND11_MODULE(_C, m) {
         "Copy tensor between host and device using DMA", py::arg("self"),
         py::arg("dst"), py::arg("non_blocking") = false);
 
-  // Copy tensor raw function for KV Caching
-  m.def("copy_tensor_raw", &spyre::copy_tensor_raw,
-        "Copy tensor between host and device, either way, using DMA",
-        py::arg("dev_tensor"), py::arg("pool"), py::arg("slot_id"),
-        py::arg("to_device"), py::arg("non_blocking") = false,
+  // Single KV page copy
+  m.def("copy_kv_page_raw", &spyre::copy_kv_page_raw,
+        "Copy one KV cache page between host pool and device using DMA",
+        py::arg("cache"), py::arg("block_id"), py::arg("pool"),
+        py::arg("slot_id"), py::arg("to_device"),
+        py::arg("non_blocking") = false,
         py::call_guard<py::gil_scoped_release>());
 
   // Device-side fill using FillDMA (no host buffer or H2D copy)
