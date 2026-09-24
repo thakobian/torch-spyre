@@ -51,20 +51,21 @@ def slot_major_layout(num_slots, num_kv_heads, head_size, dtype=torch.float16):
     )
 
 
-class TestSpyre(TestCase):
-    def _make_cache(self, kv_cache_shape, fill_random):
-        """Allocate a KV cache with the production layout. Host allocated then
-        transferred, since only .to() accepts a device_layout.
-        """
-        num_blocks, block_size, num_kv_heads, head_dim = kv_cache_shape
-        layout = slot_major_layout(num_blocks * block_size, num_kv_heads, head_dim)
-        host_cache = (
-            torch.randn(kv_cache_shape, dtype=torch.float16)
-            if fill_random
-            else torch.zeros(kv_cache_shape, dtype=torch.float16)
-        )
-        return host_cache.to("spyre", device_layout=layout)
+def make_cache(kv_cache_shape, fill_random):
+    """Allocate a KV cache with the production layout. Host allocated then
+    transferred, since only .to() accepts a device_layout.
+    """
+    num_blocks, block_size, num_kv_heads, head_dim = kv_cache_shape
+    layout = slot_major_layout(num_blocks * block_size, num_kv_heads, head_dim)
+    host_cache = (
+        torch.randn(kv_cache_shape, dtype=torch.float16)
+        if fill_random
+        else torch.zeros(kv_cache_shape, dtype=torch.float16)
+    )
+    return host_cache.to("spyre", device_layout=layout)
 
+
+class TestSpyre(TestCase):
     def _pool(self, cache, num_blocks):
         page_bytes = get_composite_address(cache).total_size // num_blocks
         return SharedHostPool.create_or_attach(
@@ -76,8 +77,8 @@ class TestSpyre(TestCase):
         The expected tensor is zero everywhere except the page we moved, so this
         checks the page survived and that no sibling page was written.
         """
-        source_cache = self._make_cache(kv_cache_shape, fill_random=True)
-        dest_cache = self._make_cache(kv_cache_shape, fill_random=False)
+        source_cache = make_cache(kv_cache_shape, fill_random=True)
+        dest_cache = make_cache(kv_cache_shape, fill_random=False)
         pool = self._pool(source_cache, kv_cache_shape[0])
 
         # D2H: only block_id should land in slot 0
@@ -121,14 +122,14 @@ class TestSpyre(TestCase):
     def test_rejects_page_view(self):
         """The whole cache and a block_id, not a pre sliced page."""
         shape = (NUM_BLOCKS, 16, NUM_KV_HEADS, HEAD_DIM)
-        cache = self._make_cache(shape, fill_random=True)
+        cache = make_cache(shape, fill_random=True)
         pool = self._pool(cache, NUM_BLOCKS)
         with self.assertRaises(RuntimeError):
             copy_kv_page_raw(cache[1], 0, pool, 0, to_device=False)
 
     def test_rejects_block_id_out_of_range(self):
         shape = (NUM_BLOCKS, 16, NUM_KV_HEADS, HEAD_DIM)
-        cache = self._make_cache(shape, fill_random=True)
+        cache = make_cache(shape, fill_random=True)
         pool = self._pool(cache, NUM_BLOCKS)
         with self.assertRaises(RuntimeError):
             copy_kv_page_raw(cache, NUM_BLOCKS, pool, 0, to_device=False)
