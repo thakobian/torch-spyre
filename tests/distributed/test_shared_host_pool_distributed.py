@@ -76,8 +76,8 @@ class TestSharedHostPoolCrossProcess(TestCase):
 
     def test_cross_process_shared_pool(self):
         """
-        A shared host pool created in one process must be visible to another
-        process attaching the same name.
+        A pool created in one process can be attached by name in another, with
+        matching geometry.
         """
         num_slots = 1
         slot_bytes = 10

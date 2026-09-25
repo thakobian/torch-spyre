@@ -13,33 +13,24 @@
 # limitations under the License.
 
 
-import torch
-
 from torch.testing._internal.common_utils import (
     TestCase,
     run_tests,
 )
-from transformers import AutoConfig
 
-from torch_spyre._C import (  # type: ignore[attr-defined]
-    SharedHostPool,
-    get_composite_address,
-)
+from torch_spyre._C import SharedHostPool  # type: ignore[attr-defined]
+
+# Fixed slot sizes keep this test offline and focused on pool creation and
+# attachment. 128 B is one stick. 256 KiB is 262144 B, and 8 of those slots
+# make a 2 MiB pool.
+SMALL_SLOT_BYTES = 128
+LARGE_SLOT_BYTES = 256 * 1024
 
 
 class TestSharedHostPool(TestCase):
     """
     Tests for the SharedHostPool functionality in the torch_spyre module.
     """
-
-    def setUp(self):
-        super().setUp()
-
-        # Load the model configuration for ibm-ai-platform/micro-g3.3-8b-instruct-1b
-        self.cfg = AutoConfig.from_pretrained(
-            "ibm-ai-platform/micro-g3.3-8b-instruct-1b"
-        )
-        self.head_dim = self.cfg.hidden_size // self.cfg.num_attention_heads
 
     def test_create_or_attach(self):
         # Create a shared pool
@@ -77,57 +68,25 @@ class TestSharedHostPool(TestCase):
         # Confirm that the shared pool does not have a host pointer attribute
         self.assertFalse(hasattr(shared_pool, "slot_ptr"))
 
-    def test_pool_real_model_small_slot(self):
-        """
-        Test SharedHostPool creation with real model ibm-ai-platform/micro-g3.3-8b-instruct-1b
-        with a small slot for K/V for 16 tokens 64 (KiB).
-        """
-        # Shape: num_hidden_layers x 2 (K & V) x 16 (block size) x num_key_value_heads x head_dim
-        block_size = 16
-        kv_page_shape = (
-            self.cfg.num_hidden_layers,
-            2,
-            block_size,
-            self.cfg.num_key_value_heads,
-            self.head_dim,
+    def test_pool_small_slot(self):
+        """Many small slots, one stick each."""
+        slot_count = 512
+        shared_pool = SharedHostPool.create_or_attach(
+            self.id(), slot_count, SMALL_SLOT_BYTES
         )
 
-        # Create a tensor for KV Cache page with the shape needed for the model
-        kv_page_tensor = torch.randn(kv_page_shape, device="spyre", dtype=torch.float16)
+        self.assertEqual(shared_pool.slot_count(), slot_count)
+        self.assertGreaterEqual(shared_pool.slot_bytes(), SMALL_SLOT_BYTES)
 
-        # Padded/tiled byte count of the page is the slot size
-        slot_bytes = get_composite_address(kv_page_tensor).total_size
-
-        # Choosing common prompt length of 8192 (tokens) for testing
-        slot_count = 8192 // block_size
-
-        SharedHostPool.create_or_attach(self.id(), int(slot_count), int(slot_bytes))
-
-    def test_pool_real_model_large_slot(self):
-        """
-        Test SharedHostPool creation with real model ibm-ai-platform/micro-g3.3-8b-instruct-1b
-        with a large slot for K/V for 1024 tokens 4 (MiB) to test a multi-MB page.
-        """
-        # Shape: num_hidden_layers x 2 (K & V) x 1024 (block size) x num_key_value_heads x head_dim
-        block_size = 1024
-        kv_page_shape = (
-            self.cfg.num_hidden_layers,
-            2,
-            block_size,
-            self.cfg.num_key_value_heads,
-            self.head_dim,
+    def test_pool_large_slot(self):
+        """A multi MB pool, 8 slots of 256 KiB."""
+        slot_count = 8
+        shared_pool = SharedHostPool.create_or_attach(
+            self.id(), slot_count, LARGE_SLOT_BYTES
         )
 
-        # Create a tensor for KV Cache page with the shape needed for the model
-        kv_page_tensor = torch.randn(kv_page_shape, device="spyre", dtype=torch.float16)
-
-        # Padded/tiled byte count of the page is the slot size
-        slot_bytes = get_composite_address(kv_page_tensor).total_size
-
-        # Choosing common prompt length of 8192 (tokens) for testing
-        slot_count = 8192 // block_size
-
-        SharedHostPool.create_or_attach(self.id(), int(slot_count), int(slot_bytes))
+        self.assertEqual(shared_pool.slot_count(), slot_count)
+        self.assertGreaterEqual(shared_pool.slot_bytes(), LARGE_SLOT_BYTES)
 
     def test_name(self):
         # Create a shared pool
