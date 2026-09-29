@@ -609,10 +609,12 @@ flex::Range derive_kv_page_range(const at::Tensor& cache, size_t block_id) {
   const SpyreTensorLayout layout = get_spyre_tensor_layout(cache);
   const std::vector<int64_t>& device_size = layout.device_size;
 
+  // Check logical shape
   TORCH_CHECK(cache.dim() == 4,
               "copy_kv_page_raw: expected a rank 4 KV cache, got rank ",
               cache.dim());
 
+  // Check device shape
   TORCH_CHECK(device_size.size() == 4,
               "copy_kv_page_raw: expected a rank 4 device layout, got rank ",
               device_size.size(),
@@ -622,6 +624,8 @@ flex::Range derive_kv_page_range(const at::Tensor& cache, size_t block_id) {
   const int64_t num_blocks = cache.size(0);
   const int64_t head_size = cache.size(3);
   const int64_t elems_per_stick = device_size[3];
+
+  TORCH_CHECK(elems_per_stick > 0, "copy_kv_page_raw: invalid stick width");
 
   TORCH_CHECK(head_size % elems_per_stick == 0, "copy_kv_page_raw: head_size ",
               head_size, " is not a multiple of the stick width ",
@@ -640,21 +644,31 @@ flex::Range derive_kv_page_range(const at::Tensor& cache, size_t block_id) {
   }
 
   TORCH_CHECK(num_blocks > 0, "copy_kv_page_raw: cache has no pages");
-  // Device dim 0 folds page and inner extent, block_size for token major or
-  // kv heads for head major. Exact, not divisible: a prefix view like
-  // cache[0:2] keeps the full cache's layout while reporting a smaller
-  // size(0), so page_bytes would come out a multiple too large.
-  TORCH_CHECK(device_size[0] == num_blocks * cache.size(1) ||
-                  device_size[0] == num_blocks * cache.size(2),
-              "copy_kv_page_raw: device dim 0 (", device_size[0],
-              ") does not fold ", num_blocks,
-              " pages. Pass a whole cache, not a view of one");
+
+  TORCH_CHECK(cache.is_contiguous(),
+              "copy_kv_page_raw: cache must be logically contiguous");
+
+  // Require the canonical KV cache layout:
+  // logical [pages, X, Y, head_size] maps to
+  // device [pages * X, Y, head_size / 64, 64] for fp16.
+  // X/Y are slots/heads for slot-major, or heads/slots for head-major.
+  const std::vector<int64_t> expected_device_size = {
+      num_blocks * cache.size(1),
+      cache.size(2),
+      head_size / elems_per_stick,
+      elems_per_stick,
+  };
+
+  TORCH_CHECK(
+      device_size == expected_device_size,
+      "copy_kv_page_raw: device layout does not match the full canonical "
+      "KV cache shape; pass the full cache, not a partial view");
 
   TORCH_CHECK(cache.storage_offset() == 0,
               "copy_kv_page_raw: pass the full cache and a block_id, not a "
               "page view. Got storage_offset ",
               cache.storage_offset());
-  TORCH_CHECK(static_cast<int64_t>(block_id) < num_blocks,
+  TORCH_CHECK(block_id < static_cast<size_t>(num_blocks),
               "copy_kv_page_raw: block_id ", block_id, " out of range [0, ",
               num_blocks, ")");
 
