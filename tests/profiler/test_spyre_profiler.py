@@ -26,6 +26,7 @@ from torch.testing._internal.common_utils import (
     TestCase,
     skipIfTorchDynamo,
 )
+from torch_spyre.constants import DEVICE_NAME
 
 Test_spyre = None
 if hasattr(torch, "spyre"):
@@ -58,19 +59,19 @@ class TestSpyreProfiler(TestCase):
         #   AIUpti_ActivityCompute (and _ActivityMemcpy) *after* the `name[128]`
         #   field. `name`'s own offset didn't move — but the record WALKER
         #   advances by sizeof(AIUpti_ActivityCompute) (libaiupti
-        #   aiupti_api.cpp::aiuptiActivityGetNextRecord). If libaiupti and
-        #   kineto-spyre are not rebuilt in lockstep they disagree on that size,
-        #   so after the first record every subsequent record is read at the
-        #   wrong offset and the kernel `name` lands on garbage bytes ->
-        #   UnicodeDecodeError when prof.events() -> _parse_kineto_results ->
-        #   evt.name() decodes it. Real fix = rebuild libaiupti + kineto-spyre
-        #   together. Tracked in #114.
+        #   aiupti_api.cpp::aiuptiActivityGetNextRecord). If the AIUPTI/Kineto
+        #   bridge built into torch_spyre is stale relative to libaiupti, they
+        #   disagree on that size, so after the first record every subsequent
+        #   record is read at the wrong offset and the kernel `name` lands on
+        #   garbage bytes -> UnicodeDecodeError when prof.events() ->
+        #   _parse_kineto_results -> evt.name() decodes it. Real fix = rebuild
+        #   against a matching libaiupti. Tracked in #114.
         #
         # Why the body is stubbed (no `as prof`, assertTrue(True)):
         #   Reading prof.events() is what triggers the buffer walk and the crash.
         #   We still run capture + teardown (the `with profile(...)` block) but
         #   never decode the corrupt kernel name. Restore the real check (below)
-        #   once the two libs are rebuilt in lockstep.
+        #   once the ABI mismatch is fixed.
         #
         # WHY STUBBING THIS ALSO "FIXED" test_event_list /
         # test_profiler_timestamp_consistency (the surprising part):
@@ -98,7 +99,7 @@ class TestSpyreProfiler(TestCase):
             with_stack=False,
         ) as prof:
             x *= 2
-            # TODO(#114): check with_stack=True once libaiupti + kineto-spyre are rebuilt in lockstep.
+            # TODO(#114): check with_stack=True once the libaiupti ABI mismatch is fixed.
         names = [e.name for e in prof.events()]
         self.assertTrue("aten::mul_" in names)
 
@@ -252,8 +253,12 @@ def test_synchronize_callable():
 
 
 @pytest.mark.requires_spyre_profiler
-def test_compiled_kernel_event_keys_match_captured_debug_handles(monkeypatch):
+@pytest.mark.parametrize("compile_threads", [1, 2])
+def test_compiled_kernel_event_keys_match_captured_debug_handles(
+    monkeypatch, compile_threads
+):
     """Real events carry compiler keys and direct handles from the same process."""
+    from torch._inductor.codecache import CodeCacheFuture
     from torch_spyre._inductor.op_spec import LoopSpec, OpSpec
     from torch_spyre._inductor.profiler_event import (
         AIUPTI_ACTIVITY_NAME_MAX_BYTES,
@@ -261,11 +266,11 @@ def test_compiled_kernel_event_keys_match_captured_debug_handles(monkeypatch):
     )
     from torch_spyre.execution.async_compile import SpyreAsyncCompile
 
-    captures = []
+    pending_captures = []
     original_sdsc = SpyreAsyncCompile.sdsc
 
     def capture_sdsc(self, kernel_name, specs, pool_size=0):
-        runner = original_sdsc(self, kernel_name, specs, pool_size=pool_size)
+        result = original_sdsc(self, kernel_name, specs, pool_size=pool_size)
         handles = []
 
         def collect(spec_list):
@@ -276,14 +281,12 @@ def test_compiled_kernel_event_keys_match_captured_debug_handles(monkeypatch):
                     collect(spec.body)
 
         collect(specs)
-        if runner.kernel_provenance is not None:
-            captures.append(
-                (runner.kernel_provenance, runner.profiler_event_name, tuple(handles))
-            )
-        return runner
+        pending_captures.append((result, tuple(handles)))
+        return result
 
     monkeypatch.setattr(SpyreAsyncCompile, "sdsc", capture_sdsc)
     monkeypatch.setattr(torch._inductor.config, "force_disable_caches", True)
+    monkeypatch.setattr(torch._inductor.config, "compile_threads", compile_threads)
     torch._dynamo.reset()
 
     model = _ProfilerMLP().half().to("spyre").eval()
@@ -293,6 +296,17 @@ def test_compiled_kernel_event_keys_match_captured_debug_handles(monkeypatch):
     with torch.no_grad():
         compiled(x)
         torch.spyre.synchronize()
+
+        # The generated wrapper has now waited for all compile jobs. Inspect
+        # resolved runners here so capturing does not serialize compilation.
+        captures = []
+        for result, handles in pending_captures:
+            assert isinstance(result, CodeCacheFuture) == (compile_threads > 1)
+            runner = result.result() if isinstance(result, CodeCacheFuture) else result
+            if runner.kernel_provenance is not None:
+                captures.append(
+                    (runner.kernel_provenance, runner.profiler_event_name, handles)
+                )
 
         assert captures, "compilation produced no provenance-aware Spyre runners"
 
@@ -385,7 +399,7 @@ def test_compiled_kernel_event_keys_match_captured_debug_handles(monkeypatch):
 def test_kineto_memcpy_and_memset_events_captured():
     """
     Confirm that H2D memcpy, D2H memcpy, and memset events are captured
-    in the kineto-spyre Chrome trace when profiling with PrivateUse1.
+    in the AIUPTI-backed Chrome trace when profiling with PrivateUse1.
 
     Triggered operations:
       - H2D: cpu_tensor.to("spyre")
@@ -415,16 +429,17 @@ def test_kineto_memcpy_and_memset_events_captured():
     events = trace["traceEvents"]
 
     # "gpu_memcpy" / "gpu_memset" are emitted by libkineto's ActivityType::type_string()
-    # (upstream kineto, not kineto-spyre-specific) and have been stable across all kineto
-    # versions used by torch-spyre. kineto-spyre maps Spyre memory activities to these
-    # standard ActivityType values; the Chrome trace writer produces these category strings.
+    # (upstream kineto, not Spyre-specific) and have been stable across all kineto
+    # versions used by torch-spyre. torch_spyre's AIUPTI bridge maps Spyre memory
+    # activities to these standard ActivityType values; the Chrome trace writer
+    # produces these category strings.
     h2d_events = [
         e
         for e in events
         if e.get("cat") == "gpu_memcpy" and "HtoD" in e.get("name", "")
     ]
     assert h2d_events, (
-        "Expected at least one H2D memcpy event in the kineto-spyre trace"
+        "Expected at least one H2D memcpy event in the AIUPTI-backed trace"
     )
 
     d2h_events = [
@@ -433,11 +448,13 @@ def test_kineto_memcpy_and_memset_events_captured():
         if e.get("cat") == "gpu_memcpy" and "DtoH" in e.get("name", "")
     ]
     assert d2h_events, (
-        "Expected at least one D2H memcpy event in the kineto-spyre trace"
+        "Expected at least one D2H memcpy event in the AIUPTI-backed trace"
     )
 
     memset_events = [e for e in events if e.get("cat") == "gpu_memset"]
-    assert memset_events, "Expected at least one memset event in the kineto-spyre trace"
+    assert memset_events, (
+        "Expected at least one memset event in the AIUPTI-backed trace"
+    )
 
 
 @pytest.mark.requires_spyre_profiler
@@ -588,6 +605,277 @@ class TestMemoryProfilerTimeline(TestCase):
 
         for event in expected:
             self.assertTrue(event in actual, f"event: {event} was not found in actual.")
+
+
+class TestOverExtendedKernelDurations(TestCase):
+    """Fail if kernel, H2D/D2H memcpy, or memset events exceed 1000 ms.
+
+    Chrome complete-event ``dur`` is microseconds, so 1000 ms is
+    1_000_000. That fixed threshold is the #3542 contract. Cost-model
+    thresholds and TS1-TS5 effective-frequency checks are follow-ups.
+    """
+
+    ACTIVITY_TYPES = {
+        "kernel",
+        "gpu_memcpy",
+        "gpu_memset",
+    }
+
+    def _find_over_extended_activities(self, events, threshold_ms=1000):
+        """
+        Return tracked events and any whose duration exceeds threshold_ms.
+
+        Missing or non-finite ``ts``/``dur`` fail. Non-positive ``dur`` is
+        legal (instant mem ops) and is not treated as over-extended.
+        """
+
+        threshold_us = threshold_ms * 1000
+
+        tracked_events = []
+
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+
+            if event.get("ph") != "X":
+                continue
+
+            if event.get("cat") not in TestOverExtendedKernelDurations.ACTIVITY_TYPES:
+                continue
+
+            timestamp = event.get("ts")
+            duration = event.get("dur")
+            name = event.get("name", "unknown")
+
+            assert (
+                isinstance(timestamp, (int, float))
+                and not isinstance(timestamp, bool)
+                and math.isfinite(timestamp)
+            ), (
+                f"Event {name} must have a finite numeric timestamp "
+                f"(ts={timestamp}, dur={duration})"
+            )
+
+            assert (
+                isinstance(duration, (int, float))
+                and not isinstance(duration, bool)
+                and math.isfinite(duration)
+            ), (
+                f"Event {name} must have a finite numeric duration "
+                f"(ts={timestamp}, dur={duration})"
+            )
+
+            tracked_events.append(event)
+
+        over_extended = [
+            event for event in tracked_events if event["dur"] > threshold_us
+        ]
+
+        return tracked_events, over_extended
+
+    def test_find_over_extended_activities(self):
+        """Verify detection of activities that exceed the duration threshold."""
+
+        events = [
+            {
+                "ph": "X",
+                "cat": "kernel",
+                "name": "long_kernel",
+                "ts": 0,
+                "dur": 1_200_000,
+            },
+            {
+                "ph": "X",
+                "cat": "gpu_memcpy",
+                "name": "long_copy",
+                "ts": 1000,
+                "dur": 1_500_000,
+            },
+            {
+                "ph": "X",
+                "cat": "gpu_memset",
+                "name": "short_memset",
+                "ts": 3000,
+                "dur": 200_000,
+            },
+            {
+                "ph": "X",
+                "cat": "gpu_memcpy",
+                "name": "instant_copy",
+                "ts": 4000,
+                "dur": 0,
+            },
+        ]
+
+        tracked_events, over_extended = self._find_over_extended_activities(
+            events,
+            threshold_ms=1000,
+        )
+
+        self.assertEqual(len(tracked_events), 4)
+        self.assertEqual(len(over_extended), 2)
+
+        names = {event["name"] for event in over_extended}
+
+        self.assertIn("long_kernel", names)
+        self.assertIn("long_copy", names)
+        self.assertNotIn("instant_copy", names)
+
+    def test_find_over_extended_activities_invalid_events(self):
+        """Verify invalid timing data is rejected."""
+
+        missing_timestamp_event = [
+            {
+                "ph": "X",
+                "cat": "gpu_memcpy",
+                "name": "missing_ts",
+                "dur": 10,
+            }
+        ]
+
+        missing_duration_event = [
+            {
+                "ph": "X",
+                "cat": "gpu_memset",
+                "name": "missing_dur",
+                "ts": 0,
+            }
+        ]
+
+        with self.assertRaises(AssertionError):
+            self._find_over_extended_activities(missing_timestamp_event)
+
+        with self.assertRaises(AssertionError):
+            self._find_over_extended_activities(missing_duration_event)
+
+    @skipIfTorchDynamo("profiler gets ignored if dynamo activated")
+    @pytest.mark.requires_spyre_profiler
+    def test_activity_duration_limit(self):
+        """
+        Fail if any kernel, memcpy, or memset event exceeds 1000 ms.
+
+        Eager matmul/gelu is not enough to prove a chrome ``cat==kernel``
+        event. Compile the stick-aligned MLP used by the provenance test,
+        warmup outside ``profile()``, then capture H2D, the compiled
+        kernel, memset, and D2H in one trace.
+        """
+
+        torch._dynamo.reset()
+        model = _ProfilerMLP().half().to(DEVICE_NAME).eval()
+        compiled_input = torch.randn(2, 128, dtype=torch.float16, device=DEVICE_NAME)
+        compiled = torch.compile(model, fullgraph=True)
+        with torch.no_grad():
+            compiled(compiled_input)
+            torch.spyre.synchronize()
+
+        cpu_src = torch.randn(64, 64, dtype=torch.float16)
+
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.PrivateUse1]
+        ) as prof:
+            device_tensor = cpu_src.to(DEVICE_NAME)  # H2D memcpy
+
+            with torch.no_grad():
+                compiled_out = compiled(compiled_input)
+
+            _ = torch.zeros(
+                64,
+                64,
+                dtype=torch.float16,
+                device=DEVICE_NAME,
+            )  # memset
+
+            _ = device_tensor.cpu()  # D2H memcpy
+            _ = compiled_out.cpu()
+
+            torch.spyre.synchronize()
+        with TemporaryFileName(mode="w+") as trace_file:
+            prof.export_chrome_trace(trace_file)
+
+            with open(trace_file, "r") as trace:
+                trace_data = json.load(trace)
+
+        self.assertIsInstance(
+            trace_data,
+            dict,
+            "Trace JSON must be a dictionary",
+        )
+
+        self.assertIn(
+            "traceEvents",
+            trace_data,
+            "Chrome trace is missing the 'traceEvents' key",
+        )
+
+        trace_events = trace_data["traceEvents"]
+
+        h2d_events = [
+            event
+            for event in trace_events
+            if event.get("cat") == "gpu_memcpy" and "HtoD" in event.get("name", "")
+        ]
+
+        d2h_events = [
+            event
+            for event in trace_events
+            if event.get("cat") == "gpu_memcpy" and "DtoH" in event.get("name", "")
+        ]
+
+        memset_events = [
+            event for event in trace_events if event.get("cat") == "gpu_memset"
+        ]
+
+        kernel_events = [
+            event
+            for event in trace_events
+            if event.get("cat") == "kernel" and event.get("ph") == "X"
+        ]
+
+        self.assertTrue(
+            h2d_events,
+            "Expected at least one HtoD memcpy event",
+        )
+
+        self.assertTrue(
+            d2h_events,
+            "Expected at least one DtoH memcpy event",
+        )
+
+        self.assertTrue(
+            memset_events,
+            "Expected at least one memset event",
+        )
+
+        self.assertIsInstance(
+            trace_events,
+            list,
+            "'traceEvents' must contain a list",
+        )
+
+        self.assertTrue(
+            kernel_events,
+            "Expected at least one kernel event",
+        )
+
+        tracked_events, over_extended = self._find_over_extended_activities(
+            trace_events,
+            threshold_ms=1000,
+        )
+
+        if over_extended:
+            details = []
+
+            for event in over_extended[:20]:
+                details.append(
+                    f"{event.get('cat')} "
+                    f"{event.get('name', 'unknown')} "
+                    f"(ts={event['ts']}, dur={event['dur']})"
+                )
+
+            pytest.fail(
+                f"{len(over_extended)} tracked event(s) exceeded 1000 ms:\n"
+                + "\n".join(details)
+            )
 
 
 def _find_device_overlaps(events):
@@ -830,3 +1118,321 @@ def test_kernel_time_overlap(tmp_path):
             f"{len(overlaps)} Spyre device overlap(s) detected:\n"
             + "\n".join(overlap_details)
         )
+
+
+def _find_duplicate_kernel_start_timestamps(events):
+    """Return complete Spyre kernel events and duplicate start timestamp groups."""
+    kernel_events = []
+    # Group by stream and timestamp so matching timestamps on different streams are allowed.
+    timestamp_groups = {}
+
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("ph") != "X" or event.get("cat") != "kernel":
+            continue
+
+        timestamp = event.get("ts")
+        stream_id = event.get("tid")
+        name = event.get("name", "unknown")
+
+        assert (
+            isinstance(timestamp, (int, float))
+            and not isinstance(timestamp, bool)
+            and math.isfinite(timestamp)
+        ), (
+            f"Spyre kernel event {name} must have a finite numeric timestamp "
+            f"(ts={timestamp})"
+        )
+
+        assert isinstance(stream_id, int) and not isinstance(stream_id, bool), (
+            f"Spyre kernel event {name} must have a valid stream ID (tid={stream_id})"
+        )
+
+        kernel_events.append(event)
+
+        group_key = (stream_id, timestamp)
+
+        if group_key not in timestamp_groups:
+            timestamp_groups[group_key] = []
+
+        timestamp_groups[group_key].append(event)
+
+    duplicate_groups = [
+        (stream_id, timestamp, grouped_events)
+        for (stream_id, timestamp), grouped_events in timestamp_groups.items()
+        if len(grouped_events) > 1
+    ]
+
+    duplicate_groups.sort(key=lambda group: (group[0], group[1]))
+
+    return kernel_events, duplicate_groups
+
+
+def test_find_duplicate_kernel_start_timestamps():
+    """Verify duplicate start timestamp detection with synthetic kernel events."""
+    clean_events = [
+        {
+            "ph": "X",
+            "cat": "kernel",
+            "name": "kernel_1",
+            "ts": 0,
+            "dur": 10,
+            "tid": 1,
+        },
+        {
+            "ph": "X",
+            "cat": "kernel",
+            "name": "kernel_2",
+            "ts": 10,
+            "dur": 10,
+            "tid": 1,
+        },
+    ]
+
+    duplicate_events = [
+        {
+            "ph": "X",
+            "cat": "kernel",
+            "name": "kernel_1",
+            "ts": 0,
+            "dur": 10,
+            "tid": 1,
+        },
+        {
+            "ph": "X",
+            "cat": "kernel",
+            "name": "kernel_2",
+            "ts": 0,
+            "dur": 5,
+            "tid": 1,
+        },
+    ]
+
+    different_stream_events = [
+        {
+            "ph": "X",
+            "cat": "kernel",
+            "name": "kernel_stream_1",
+            "ts": 0,
+            "dur": 10,
+            "tid": 1,
+        },
+        {
+            "ph": "X",
+            "cat": "kernel",
+            "name": "kernel_stream_2",
+            "ts": 0,
+            "dur": 5,
+            "tid": 2,
+        },
+    ]
+
+    kernel_cpu_same_timestamp = [
+        {
+            "ph": "X",
+            "cat": "kernel",
+            "name": "kernel_1",
+            "ts": 0,
+            "dur": 10,
+            "tid": 1,
+        },
+        {
+            "ph": "X",
+            "cat": "cpu_op",
+            "name": "cpu_op_1",
+            "ts": 0,
+            "dur": 10,
+            "tid": 1,
+        },
+    ]
+
+    kernel_memory_same_timestamp = [
+        {
+            "ph": "X",
+            "cat": "kernel",
+            "name": "kernel_1",
+            "ts": 0,
+            "dur": 10,
+            "tid": 1,
+        },
+        {
+            "ph": "X",
+            "cat": "gpu_memcpy",
+            "name": "Memcpy (HtoD)",
+            "ts": 0,
+            "dur": 10,
+            "tid": 1,
+        },
+    ]
+
+    clean_kernel_events, clean_duplicates = _find_duplicate_kernel_start_timestamps(
+        clean_events
+    )
+    duplicate_kernel_events, duplicate_groups = _find_duplicate_kernel_start_timestamps(
+        duplicate_events
+    )
+    different_stream_kernel_events, different_stream_duplicates = (
+        _find_duplicate_kernel_start_timestamps(different_stream_events)
+    )
+    cpu_kernel_events, cpu_kernel_duplicates = _find_duplicate_kernel_start_timestamps(
+        kernel_cpu_same_timestamp
+    )
+    memory_kernel_events, memory_duplicates = _find_duplicate_kernel_start_timestamps(
+        kernel_memory_same_timestamp
+    )
+
+    assert len(clean_kernel_events) == 2
+    assert clean_duplicates == []
+
+    assert len(duplicate_kernel_events) == 2
+    assert len(duplicate_groups) == 1
+
+    duplicate_stream_id, duplicate_timestamp, kernels = duplicate_groups[0]
+    assert duplicate_stream_id == 1
+    assert duplicate_timestamp == 0
+    assert len(kernels) == 2
+    assert kernels[0]["name"] == "kernel_1"
+    assert kernels[1]["name"] == "kernel_2"
+
+    assert len(different_stream_kernel_events) == 2
+    assert different_stream_duplicates == []
+
+    assert len(cpu_kernel_events) == 1
+    assert cpu_kernel_duplicates == []
+
+    assert len(memory_kernel_events) == 1
+    assert memory_duplicates == []
+
+
+def test_find_duplicate_kernel_start_timestamps_invalid_events():
+    """Verify invalid kernel start timestamps are rejected."""
+    missing_timestamp_event = [
+        {"ph": "X", "cat": "kernel", "name": "kernel_missing_ts", "dur": 10}
+    ]
+
+    boolean_timestamp_event = [
+        {
+            "ph": "X",
+            "cat": "kernel",
+            "name": "kernel_boolean_ts",
+            "ts": True,
+            "dur": 10,
+        }
+    ]
+
+    non_finite_timestamp_event = [
+        {
+            "ph": "X",
+            "cat": "kernel",
+            "name": "kernel_nan_ts",
+            "ts": float("nan"),
+            "dur": 10,
+        }
+    ]
+
+    with pytest.raises(AssertionError):
+        _find_duplicate_kernel_start_timestamps(missing_timestamp_event)
+
+    with pytest.raises(AssertionError):
+        _find_duplicate_kernel_start_timestamps(boolean_timestamp_event)
+
+    with pytest.raises(AssertionError):
+        _find_duplicate_kernel_start_timestamps(non_finite_timestamp_event)
+
+
+@pytest.mark.requires_spyre_profiler
+def test_duplicate_kernel_start_timestamps(tmp_path):
+    """Verify kernel start timestamps are unique in a Spyre profiler trace."""
+    trace_file = tmp_path / "duplicate_kernel_start_timestamp_trace.json"
+
+    x = torch.randn((64, 64), dtype=torch.float16, device="spyre")
+    y = torch.randn((64, 64), dtype=torch.float16, device="spyre")
+
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.PrivateUse1]
+    ) as prof:
+        result = torch.matmul(x, y)
+        result = F.gelu(result)
+        result = torch.sum(result)
+        torch.spyre.synchronize()
+
+    prof.export_chrome_trace(str(trace_file))
+
+    assert trace_file.exists(), "Chrome trace file was not created"
+
+    with trace_file.open("r", encoding="utf-8") as trace:
+        trace_data = json.load(trace)
+
+    assert isinstance(trace_data, dict), "Trace JSON must be a dictionary"
+    assert "traceEvents" in trace_data, "Chrome trace is missing the 'traceEvents' key"
+
+    trace_events = trace_data["traceEvents"]
+    assert isinstance(trace_events, list), "'traceEvents' must contain a list"
+
+    kernel_events, duplicate_groups = _find_duplicate_kernel_start_timestamps(
+        trace_events
+    )
+
+    assert len(kernel_events) >= 2, (
+        "Expected at least two Spyre kernel events for duplicate timestamp validation"
+    )
+
+    if duplicate_groups:
+        duplicate_details = []
+
+        for stream_id, timestamp, grouped_events in duplicate_groups[:10]:
+            event_details = []
+
+            for event in grouped_events:
+                details = (
+                    f"{event.get('name', 'unknown')} "
+                    f"(ts={event.get('ts')}, dur={event.get('dur', 'unknown')}, "
+                    f"pid={event.get('pid', 'unknown')}, "
+                    f"tid={event.get('tid', 'unknown')})"
+                )
+                event_details.append(details)
+
+            duplicate_details.append(
+                f"tid={stream_id}, ts={timestamp}: {', '.join(event_details)}"
+            )
+
+        pytest.fail(
+            f"{len(duplicate_groups)} duplicate kernel start timestamp group(s) "
+            f"detected:\n" + "\n".join(duplicate_details)
+        )
+
+
+@pytest.mark.requires_spyre_profiler
+def test_runtime_events_emitted_on_multiple_thread_rows():
+    """Runtime activities are attributed to the flex thread that emitted them,
+    so they span more than one thread row instead of collapsing onto one."""
+    cpu_src = torch.randn(64, 64, dtype=torch.float16)
+
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.PrivateUse1]
+    ) as prof:
+        device_tensor = cpu_src.to("spyre")
+        _ = device_tensor + device_tensor
+        _ = device_tensor.cpu()
+        torch.spyre.synchronize()
+
+    with TemporaryFileName(mode="w+") as fname:
+        prof.export_chrome_trace(fname)
+        with open(fname) as f:
+            trace = json.load(f)
+
+    events = trace.get("traceEvents", [])
+    runtime_tids = {
+        e["tid"]
+        for e in events
+        if e.get("cat") == "privateuse1_runtime" and e.get("ph") == "X"
+    }
+
+    assert runtime_tids, (
+        "Expected at least one runtime event in the AIUPTI-backed trace"
+    )
+    assert len(runtime_tids) > 1, (
+        f"Runtime events all landed on tid(s) {sorted(runtime_tids)}; "
+        "expected more than one thread row"
+    )

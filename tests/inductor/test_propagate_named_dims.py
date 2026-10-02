@@ -32,7 +32,7 @@ import torch_spyre._inductor.passes as _passes
 import torch_spyre._inductor.wsr.propagate_named_dims as _pnd
 from torch_spyre._inductor import spyre_hint as _spyre_hint
 from torch_spyre._inductor.pass_utils import find_reduction_var
-from utils_inductor import _compile_and_run
+from utils_inductor import _compile_and_run, mock_backend_compiler
 
 DEVICE = torch.device("spyre")
 
@@ -121,7 +121,7 @@ def _run_and_capture(
         patch.object(_passes, "assign_dim_hints", capturing_assign),
         patch("torch_spyre.execution.kernel_runner.prepare_kernel"),
         patch("torch_spyre.execution.kernel_runner.launch_jobplan"),
-        patch("torch_spyre.execution.async_compile.subprocess.run"),
+        mock_backend_compiler(),
     ):
         try:
             _compile_and_run(fn, args, DEVICE)
@@ -1013,6 +1013,23 @@ def test_reshape_1d_to_2d_exp():
             named_dims={"A": _A},
             tensor_dims={x: ["A"]},
         )
+
+
+def test_constant_indexed_dim_is_consumed_without_mapping():
+    """A fixed source slice consumes its name but has no output loop variable."""
+    rows, cols = 2, 128
+    x = torch.randn(rows, cols, dtype=torch.float16, device=DEVICE)
+
+    def fn(x):
+        return x[0].exp()
+
+    _run_and_capture(
+        fn,
+        [x],
+        named_dims={"R": rows, "C": cols},
+        tensor_dims={x: ["R", "C"]},
+        expected_propagated_dims=["C"],
+    )
 
 
 # -------- Stride-0 broadcast (torch.expand) tests --------
