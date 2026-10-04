@@ -48,6 +48,8 @@ __all__: list[str] = [
     "spyre_empty_with_layout",
     "start_runtime",
     "to_with_layout",
+    "SharedPool",
+    "SharedHostPool",
 ]
 
 AIUPTI_ACTIVITY_NAME_MAX_BYTES: int
@@ -102,25 +104,38 @@ class DataFormats:
       SEN18F_FP24
     """
 
-    BFLOAT16: typing.ClassVar[DataFormats]  # value = <DataFormats.BFLOAT16: 17>
+    # value = <DataFormats.BFLOAT16: 17>
+    BFLOAT16: typing.ClassVar[DataFormats]
     BOOL: typing.ClassVar[DataFormats]  # value = <DataFormats.BOOL: 16>
-    IEEE_FP16: typing.ClassVar[DataFormats]  # value = <DataFormats.IEEE_FP16: 15>
-    IEEE_FP32: typing.ClassVar[DataFormats]  # value = <DataFormats.IEEE_FP32: 1>
-    IEEE_INT32: typing.ClassVar[DataFormats]  # value = <DataFormats.IEEE_INT32: 12>
-    IEEE_INT64: typing.ClassVar[DataFormats]  # value = <DataFormats.IEEE_INT64: 11>
+    # value = <DataFormats.IEEE_FP16: 15>
+    IEEE_FP16: typing.ClassVar[DataFormats]
+    # value = <DataFormats.IEEE_FP32: 1>
+    IEEE_FP32: typing.ClassVar[DataFormats]
+    # value = <DataFormats.IEEE_INT32: 12>
+    IEEE_INT32: typing.ClassVar[DataFormats]
+    # value = <DataFormats.IEEE_INT64: 11>
+    IEEE_INT64: typing.ClassVar[DataFormats]
     INVALID: typing.ClassVar[DataFormats]  # value = <DataFormats.INVALID: 2>
-    SEN143_FP8: typing.ClassVar[DataFormats]  # value = <DataFormats.SEN143_FP8: 3>
-    SEN152_FP8: typing.ClassVar[DataFormats]  # value = <DataFormats.SEN152_FP8: 4>
-    SEN153_FP9: typing.ClassVar[DataFormats]  # value = <DataFormats.SEN153_FP9: 5>
-    SEN169_FP16: typing.ClassVar[DataFormats]  # value = <DataFormats.SEN169_FP16: 0>
-    SEN18F_FP24: typing.ClassVar[DataFormats]  # value = <DataFormats.SEN18F_FP24: 18>
+    # value = <DataFormats.SEN143_FP8: 3>
+    SEN143_FP8: typing.ClassVar[DataFormats]
+    # value = <DataFormats.SEN152_FP8: 4>
+    SEN152_FP8: typing.ClassVar[DataFormats]
+    # value = <DataFormats.SEN153_FP9: 5>
+    SEN153_FP9: typing.ClassVar[DataFormats]
+    # value = <DataFormats.SEN169_FP16: 0>
+    SEN169_FP16: typing.ClassVar[DataFormats]
+    # value = <DataFormats.SEN18F_FP24: 18>
+    SEN18F_FP24: typing.ClassVar[DataFormats]
     SENINT16: typing.ClassVar[DataFormats]  # value = <DataFormats.SENINT16: 9>
     SENINT2: typing.ClassVar[DataFormats]  # value = <DataFormats.SENINT2: 6>
-    SENINT24: typing.ClassVar[DataFormats]  # value = <DataFormats.SENINT24: 10>
+    # value = <DataFormats.SENINT24: 10>
+    SENINT24: typing.ClassVar[DataFormats]
     SENINT4: typing.ClassVar[DataFormats]  # value = <DataFormats.SENINT4: 7>
     SENINT8: typing.ClassVar[DataFormats]  # value = <DataFormats.SENINT8: 8>
-    SENUINT2: typing.ClassVar[DataFormats]  # value = <DataFormats.SENUINT2: 14>
-    SENUINT32: typing.ClassVar[DataFormats]  # value = <DataFormats.SENUINT32: 13>
+    # value = <DataFormats.SENUINT2: 14>
+    SENUINT2: typing.ClassVar[DataFormats]
+    # value = <DataFormats.SENUINT32: 13>
+    SENUINT32: typing.ClassVar[DataFormats]
     __members__: typing.ClassVar[
         dict[str, DataFormats]
     ]  # value = {'SEN169_FP16': <DataFormats.SEN169_FP16: 0>, 'IEEE_FP32': <DataFormats.IEEE_FP32: 1>, 'INVALID': <DataFormats.INVALID: 2>, 'SEN143_FP8': <DataFormats.SEN143_FP8: 3>, 'SEN152_FP8': <DataFormats.SEN152_FP8: 4>, 'SEN153_FP9': <DataFormats.SEN153_FP9: 5>, 'SENINT2': <DataFormats.SENINT2: 6>, 'SENINT4': <DataFormats.SENINT4: 7>, 'SENINT8': <DataFormats.SENINT8: 8>, 'SENINT16': <DataFormats.SENINT16: 9>, 'SENINT24': <DataFormats.SENINT24: 10>, 'IEEE_INT64': <DataFormats.IEEE_INT64: 11>, 'IEEE_INT32': <DataFormats.IEEE_INT32: 12>, 'SENUINT32': <DataFormats.SENUINT32: 13>, 'SENUINT2': <DataFormats.SENUINT2: 14>, 'IEEE_FP16': <DataFormats.IEEE_FP16: 15>, 'BOOL': <DataFormats.BOOL: 16>, 'BFLOAT16': <DataFormats.BFLOAT16: 17>, 'SEN18F_FP24': <DataFormats.SEN18F_FP24: 18>}
@@ -161,7 +176,8 @@ class ElementArrangement:
     QFP8CH: typing.ClassVar[
         ElementArrangement
     ]  # value = <ElementArrangement.QFP8CH: 2>
-    EXX2: typing.ClassVar[ElementArrangement]  # value = <ElementArrangement.EXX2: 3>
+    # value = <ElementArrangement.EXX2: 3>
+    EXX2: typing.ClassVar[ElementArrangement]
     FP32_TO_DL16: typing.ClassVar[
         ElementArrangement
     ]  # value = <ElementArrangement.FP32_TO_DL16: 4>
@@ -226,6 +242,7 @@ class _SpyreStreamBase:
 
     Represents a stream of execution on a Spyre device.
     """
+
     def synchronize(self) -> None:
         """Wait for all operations on this stream to complete"""
         ...
@@ -383,6 +400,7 @@ class SymbolicArg:
     value: int
     tensor_id: int
     dim_index: int
+
     def __init__(
         self,
         kind: SymbolicArgKind,
@@ -398,6 +416,7 @@ class JobPlan:
 
     Produced by prepare_kernel() and consumed by launch_jobplan().
     """
+
     def num_steps(self) -> int:
         """Get the number of steps in the JobPlan"""
         ...
@@ -464,7 +483,8 @@ def spyre_empty_with_layout(
 ) -> torch.Tensor: ...
 
 class SpyreStreamError:
-    Success: typing.ClassVar[SpyreStreamError]  # value = <SpyreStreamError.Success: 0>
+    # value = <SpyreStreamError.Success: 0>
+    Success: typing.ClassVar[SpyreStreamError]
     Shutdown: typing.ClassVar[
         SpyreStreamError
     ]  # value = <SpyreStreamError.Shutdown: 1>
@@ -501,3 +521,17 @@ def stream_get_error_string(error: SpyreStreamError) -> str: ...
 def get_device_state() -> SpyreDeviceState: ...
 def start_runtime() -> None: ...
 def to_with_layout(arg0: torch.Tensor, arg1: SpyreTensorLayout) -> torch.Tensor: ...
+
+class SharedPool:
+    def slot_count(self) -> int: ...
+    def slot_bytes(self) -> int: ...
+    def name(self) -> str: ...
+    def total_bytes(self) -> int: ...
+
+class SharedHostPool(SharedPool):
+    @staticmethod
+    def create_or_attach(
+        name: str, num_slots: int, slot_bytes: int
+    ) -> SharedHostPool: ...
+    @staticmethod
+    def unlink_by_name(name: str) -> None: ...

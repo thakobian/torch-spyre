@@ -18,7 +18,7 @@ from torch.testing._internal.common_utils import (
     run_tests,
 )
 
-from torch_spyre._C import SharedHostPool  # type: ignore[attr-defined]
+from torch_spyre._C import SharedHostPool
 
 # Fixed slot sizes keep this test offline and focused on pool creation and
 # attachment. 128 B is one stick. 256 KiB is 262144 B, and 8 of those slots
