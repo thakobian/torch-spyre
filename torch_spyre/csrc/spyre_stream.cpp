@@ -34,6 +34,7 @@
 #include "logging.h"
 #include "module.h"
 #include "spyre_allocator.h"
+#include "spyre_composite_address.h"
 #include "spyre_error.h"
 #include "spyre_guard.h"
 #include "spyre_mem.h"
@@ -146,8 +147,8 @@ int SpyreStream::priority() const {
 bool SpyreStream::query() const {
   c10::DeviceGuard guard(stream_.device());
 
-  DEBUGINFO("SpyreStream::query() - stream ", id(), " on device ",
-            static_cast<int>(device().index()));
+  SPYRE_RUNTIME_DEBUG() << "stream " << id() << " on device "
+                        << static_cast<int>(device().index());
 
   flex::RuntimeStream* handle = resolveRuntimeHandle();
   return handle->query();
@@ -157,8 +158,8 @@ void SpyreStream::synchronize() const {
   RECORD_FUNCTION("host::synchronize", {});
   c10::DeviceGuard device_guard(stream_.device());
 
-  DEBUGINFO("SpyreStream::synchronize() - stream ", id(), " on device ",
-            static_cast<int>(device().index()));
+  SPYRE_RUNTIME_DEBUG() << "stream " << id() << " on device "
+                        << static_cast<int>(device().index());
 
   resolveRuntimeHandle()->synchronize();
 }
@@ -176,8 +177,10 @@ void SpyreStream::copyProgramAsync(
 
 void SpyreStream::copyAsync(const at::Tensor& src,
                             const at::Tensor& dst) const {
-  DEBUGINFO("src (", src.scalar_type(), ") is on:", src.device());
-  DEBUGINFO("dst (", dst.scalar_type(), ") on:", dst.device());
+  SPYRE_RUNTIME_DEBUG() << "src (" << src.scalar_type()
+                        << ") is on:" << src.device();
+  SPYRE_RUNTIME_DEBUG() << "dst (" << dst.scalar_type()
+                        << ") on:" << dst.device();
 
   // Determine copy direction
   bool host2device = src.is_cpu() && dst.is_privateuseone();
@@ -193,16 +196,11 @@ void SpyreStream::copyAsync(const at::Tensor& src,
     // Get SpyreTensorLayout using the public API
     SpyreTensorLayout stl = get_spyre_tensor_layout(*dev_tensor);
 
-    // Extract device allocation from Spyre tensor storage
-    auto* spyre_impl =
-        static_cast<SpyreTensorImpl*>(dev_tensor->unsafeGetTensorImpl());
-    auto& storage = spyre_impl->storage();
-    auto* ctx = static_cast<SharedOwnerCtx*>(storage.data_ptr().get_context());
+    DataConversionInfo dci =
+        generate_dci(cpu_tensor, dev_tensor, stl, host2device);
 
-    DataConversionInfo dci = generate_dci(
-        cpu_tensor, dev_tensor, stl, cpu_tensor->storage_offset(), host2device);
-
-    copyAsyncImpl(cpu_ptr, &ctx->composite_addr, &dci, host2device);
+    copyAsyncImpl(cpu_ptr, get_composite_address(*dev_tensor), &dci,
+                  host2device);
 
   } else {
     TORCH_CHECK(false, "Unsupported copy types: src on ", src.device(),
@@ -281,6 +279,9 @@ void SpyreStream::copyRaw(const flex::SharedPool& pool, size_t slot_id,
                           std::optional<flex::Range> range) const {
   resolveRuntimeHandle()->copyRaw(pool, slot_id, device_address, to_device,
                                   range);
+void SpyreStream::launchHostCompute(flex::HostComputeParams* params) const {
+  RECORD_FUNCTION("launch::HostCompute", {});
+  resolveRuntimeHandle()->launchHostCompute(params);
 }
 
 void SpyreStream::launch(const JobPlan& plan,

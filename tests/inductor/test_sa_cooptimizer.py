@@ -38,6 +38,8 @@ import sys
 import unittest
 from unittest import TestCase
 
+import sympy
+
 from torch_spyre._inductor.scratchpad import utils
 from torch_spyre._inductor.scratchpad.sa_cooptimizer import (
     _MAX_STEPS,
@@ -49,13 +51,13 @@ from torch_spyre._inductor.scratchpad.permutation_layout import (
     make_permutation_packer,
 )
 
-from tests.inductor.cooptimization_capture_loader import load_captures
+from cooptimization_capture_loader import load_captures
 from torch_spyre._inductor.scratchpad.plan_solver import (
     BufferType,
     CoreDivision,
     CoreDivisionBuffer,
 )
-from tests.inductor.synthetic_cooptimization_graphs import synthetic_graphs
+from synthetic_cooptimization_graphs import synthetic_graphs
 
 
 def _seed_footprint(buffers):
@@ -146,9 +148,10 @@ def _geometry_violations(buffers, capacity, alignment):
     """Every way a solved layout can be geometrically wrong, as a list of
     human-readable strings (empty == the layout is realizable).
 
-    Derived from the returned buffers alone -- lifetimes off ``uses``, per-core
-    footprints off ``size`` and the chosen division's ``output_partition`` -- so
-    it shares no code with the packer whose output it judges. That is the point:
+    Derived from the returned buffers alone -- lifetimes off ``uses`` and
+    ``lifetime_end_override``, per-core footprints off ``size`` and the chosen
+    division's ``output_partition`` -- so it shares no code with the packer
+    whose output it judges. That is the point:
     ``test_probe_walk_leaves_the_packer_consistent`` compares the incremental
     packer against a from-scratch rebuild, which catches bookkeeping drift but
     puts the same geometry rules on both sides, so a systematic placement bug
@@ -179,11 +182,16 @@ def _geometry_violations(buffers, capacity, alignment):
     # A buffer with no uses is alive at no tick, so it can overlap nothing; the
     # alignment and capacity checks above still covered it.
     live = [b for b in resident if b.uses]
+
+    def end(b):
+        return max(b.uses[-1] + 1, b.lifetime_end_override or 0)
+
     for i, bi in enumerate(live):
         for bj in live[i + 1 :]:
-            # Lifetimes are the half-open [uses[0], uses[-1] + 1), re-derived
-            # here rather than taken from the buffer's own properties.
-            if not (bi.uses[0] < bj.uses[-1] + 1 and bj.uses[0] < bi.uses[-1] + 1):
+            # Lifetimes are the half-open [uses[0], end), re-derived here rather
+            # than taken from the buffer's own properties; ``end`` extends to a
+            # counted loop's end when the buffer carries that override.
+            if not (bi.uses[0] < end(bj) and bj.uses[0] < end(bi)):
                 continue
             lo_i, hi_i = bi.address, bi.address + footprint[bi.name]
             lo_j, hi_j = bj.address, bj.address + footprint[bj.name]
@@ -244,7 +252,7 @@ class GeometricValidityTest(TestCase):
             first_use_is_read=False,
             in_place_parents=list(in_place_parents),
             # The trivial division, so the per-core footprint is ``size``.
-            core_divisions=[CoreDivision(output_splits={}, reduction_splits={})],
+            core_divisions=[CoreDivision()],
             boundary=BufferType.Intermediate,
         )
         buf.chosen_division = 0
@@ -288,6 +296,16 @@ class GeometricValidityTest(TestCase):
 
         b.address = 896  # aligned and clear of a, but [896, 1152) exceeds 1024
         self.assertEqual(len(_geometry_violations([a, b], cap, 128)), 1)
+
+    def test_lifetime_end_override_keeps_buffers_apart(self):
+        """A buffer a counted loop keeps alive past its last use (the loop body
+        re-runs) must not donate its bytes to one that starts after that use."""
+        a = self._placed("a", 512, (0, 1), None)
+        a.lifetime_end_override = 4
+        b = self._placed("b", 512, (2, 3), None)
+        out = SaCoOptimizingSolver([a, b], 1024, 128).plan_layout_and_core_divisions()
+        self.assertTrue(all(buf.address is not None for buf in out))
+        self.assertEqual(_geometry_violations(out, 1024, 128), [])
 
     def test_in_place_child_may_share_the_parent_address(self):
         """The one legitimate way two co-live buffers share bytes: the child
@@ -412,7 +430,7 @@ class UnsizedBufferTest(TestCase):
                 uses=[0, 1],
                 first_use_is_read=False,
                 residency_reason=reason,
-                core_divisions=[CoreDivision(output_splits={}, reduction_splits={})],
+                core_divisions=[CoreDivision()],
                 boundary=BufferType.Intermediate,
             )
 
@@ -488,10 +506,7 @@ class ImprovementSmokeTest(TestCase):
 
 def _div(partition):
     """A core division with the given output partition (1 == trivial/whole)."""
-    return CoreDivision(
-        output_splits=({1: partition} if partition > 1 else {}),
-        reduction_splits={},
-    )
+    return CoreDivision(splits=({1: partition} if partition > 1 else {}))
 
 
 def _cdbuf(name, parents, matches, size=1024, uses=(0, 1)):
@@ -851,9 +866,13 @@ class AllEligibleResidentTest(TestCase):
 # Snippet run in a subprocess to solve one graph (captured *or* synthetic, chosen
 # by CASE) and print its result; used by the cross-process determinism test below.
 _SOLVE_SNIPPET = """
-import copy, json, math
-from tests.inductor.cooptimization_capture_loader import load_captures
-from tests.inductor.synthetic_cooptimization_graphs import synthetic_graphs
+import copy, json, math, sys
+# Runs as `python -c` with cwd=<repo root>, so this file's own directory is not
+# on sys.path the way it is for the test module itself.  Add it explicitly so the
+# helpers import by the same bare name used at module level.
+sys.path.insert(0, {helper_dir!r})
+from cooptimization_capture_loader import load_captures
+from synthetic_cooptimization_graphs import synthetic_graphs
 from torch_spyre._inductor.scratchpad.sa_cooptimizer import SaCoOptimizingSolver
 case = {case!r}
 src = load_captures() if case in load_captures() else synthetic_graphs()
@@ -870,13 +889,19 @@ print("RESULT " + json.dumps({{
 """
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+# Where the helper modules live, for the subprocess snippet above.
+_HELPER_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _solve_with_hashseed(hs, case="sdpa"):
     """Solve ``case`` in a subprocess with ``PYTHONHASHSEED=hs``."""
     env = dict(os.environ, PYTHONHASHSEED=str(hs), TORCH_DEVICE_BACKEND_AUTOLOAD="0")
     proc = subprocess.run(
-        [sys.executable, "-c", _SOLVE_SNIPPET.format(case=case)],
+        [
+            sys.executable,
+            "-c",
+            _SOLVE_SNIPPET.format(case=case, helper_dir=_HELPER_DIR),
+        ],
         capture_output=True,
         text=True,
         env=env,
@@ -1083,18 +1108,19 @@ class ForeignParentTest(TestCase):
 
 
 class MemoryOnlyFallbackTest(TestCase):
-    """With no live ``V.graph`` there are no per-division ``OpFeatures``, so the
-    engine falls back to the memory-only spill-traffic objective.
+    """With no ``cost_expr`` -- built by the caller from a live ``V.graph``,
+    see ``CoOptimizingAllocator._solve`` -- the engine falls back to the
+    memory-only spill-traffic objective.
 
     That is the path the whole capture-driven suite above runs on, so it has to be
-    the memory-only formula exactly rather than an approximation of it. The
-    cost-model objective is covered by ``test_cost_objective.py``.
+    the memory-only formula exactly rather than an approximation of it.
     """
 
-    def test_no_live_graph_means_no_cost_objective(self):
+    def test_no_cost_expr_means_no_score_fn(self):
         buffers = [_cdbuf("A", [], {}), _cdbuf("B", ["A"], {"A": [(1, 1)]})]
         solver = SaCoOptimizingSolver(buffers, 1 << 30, 128)
-        self.assertIsNone(solver._cost_objective)
+        solver.plan_layout_and_core_divisions()
+        self.assertIsNone(solver._score_fn)
 
     def test_fallback_scores_spilled_traffic_over_the_hbm_bandwidth(self):
         # Re-derives the objective from the returned layout, sharing nothing with
@@ -1116,3 +1142,83 @@ class MemoryOnlyFallbackTest(TestCase):
                     utils.to_fixed_us(traffic / utils.hbm_bytes_per_us()),
                     f"{case}[{gi}] cap={cap}",
                 )
+
+
+class CostExprScoringTest(TestCase):
+    """``plan_layout_and_core_divisions(cost_expr)`` compiles the caller's
+    symbolic cost expression into the per-step scorer (see
+    ``SaCoOptimizingSolver._build_score_fn``). ``cost_expr`` is built the same
+    way ``CoOptimizingAllocator._solve`` builds it: a sympy expression over
+    THESE buffers' own ``sym_is_lx``/``sym_core_divs`` -- so these tests build
+    small ones by hand rather than needing a live Inductor graph.
+    """
+
+    def test_residency_symbol_drives_the_score(self):
+        buffers = [_cdbuf("A", [], {}), _cdbuf("B", ["A"], {"A": [(0, 0)]})]
+        solver = SaCoOptimizingSolver(buffers, 1 << 30, 128)
+        cost_expr = 1000 * (1 - buffers[1].sym_is_lx)
+        solver.plan_layout_and_core_divisions(cost_expr)
+        self.assertIsNotNone(solver._score_fn)
+        self.assertEqual(
+            solver._score_fn(solver.chosen, frozenset()), utils.to_fixed_us(1.0)
+        )
+        self.assertEqual(solver._score_fn(solver.chosen, frozenset({"B"})), 0)
+
+    def test_core_division_symbol_drives_the_score(self):
+        # _div(1)/_div(2)/_div(4) (see _cdbuf) -> sym_cores 1/2/4 at menu index 0/1/2.
+        buffers = [_cdbuf("A", [], {})]
+        solver = SaCoOptimizingSolver(buffers, 1 << 30, 128)
+        cost_expr = buffers[0].sym_cores * 10
+        solver.plan_layout_and_core_divisions(cost_expr)
+        self.assertEqual(
+            solver._score_fn([0], frozenset()), utils.to_fixed_us(10 / 1000)
+        )
+        self.assertEqual(
+            solver._score_fn([2], frozenset()), utils.to_fixed_us(40 / 1000)
+        )
+
+    def test_residency_and_multiple_core_division_symbols_combine(self):
+        # A single cost_expr mixing sym_is_lx with more than one sym_core_divs
+        # entry (two output-split keys and one reduction-split key) at once --
+        # the two tests above each isolate one symbol kind.
+        buf = CoreDivisionBuffer(
+            name="A",
+            size=1024,
+            uses=[0, 1],
+            first_use_is_read=False,
+            in_place_parents=[],
+            residency_reason=None,
+            core_divisions=[
+                CoreDivision(splits={0: 1, 1: 1}),
+                CoreDivision(splits={0: 2, 1: 1, 2: 1}, reduction_syms=frozenset({2})),
+                CoreDivision(splits={0: 4, 1: 2, 2: 2}, reduction_syms=frozenset({2})),
+            ],
+            parents=[],
+            cd_parent_matches={},
+            boundary=BufferType.Intermediate,
+        )
+        solver = SaCoOptimizingSolver([buf], 1 << 30, 128)
+        syms = buf.sym_core_divs
+        self.assertEqual(set(syms), {0, 1, 2})
+        cost_expr = (
+            syms[0] * 10 + syms[1] * 100 + syms[2] * 1000 + 5000 * (1 - buf.sym_is_lx)
+        )
+        solver.plan_layout_and_core_divisions(cost_expr)
+        self.assertEqual(
+            solver._score_fn([2], frozenset()),
+            utils.to_fixed_us((4 * 10 + 2 * 100 + 2 * 1000 + 5000) / 1000),
+        )
+        self.assertEqual(
+            solver._score_fn([2], frozenset({"A"})),
+            utils.to_fixed_us((4 * 10 + 2 * 100 + 2 * 1000) / 1000),
+        )
+
+    def test_unrecognized_free_symbol_falls_back_to_memory_only(self):
+        # A dynamic-shape symbol (or anything else the allocator's build could
+        # have left in) that isn't one of these buffers' own symbols must not
+        # be silently ignored or crash -- it disqualifies the whole expression.
+        buffers = [_cdbuf("A", [], {})]
+        solver = SaCoOptimizingSolver(buffers, 1 << 30, 128)
+        cost_expr = sympy.Symbol("mystery_shape_var")
+        solver.plan_layout_and_core_divisions(cost_expr)
+        self.assertIsNone(solver._score_fn)

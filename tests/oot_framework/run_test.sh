@@ -1011,14 +1011,13 @@ _cleanup_wrappers() {
         rm -f "$YAML_CONFIG"
         echo "[torch_oot_device_tests_run] Removed merged temp config: $YAML_CONFIG"
     fi
-    # Remove marker sidecar JSON written by TorchTestBase.instantiate_test.
-    # Normally deleted by _XML_INJECT_PY after injection, but when --junit-xml
-    # is not supplied _XML_INJECT_PY never runs
-    local _sidecar="${YAML_CONFIG}.markers.json"
-    if [[ -f "$_sidecar" ]]; then
+    # Remove the per-process marker sidecars written by TorchTestBase.instantiate_test.
+    local _sidecar
+    for _sidecar in "${YAML_CONFIG:-}".markers.*.json; do
+        [[ -f "$_sidecar" ]] || continue
         rm -f "$_sidecar"
         echo "[torch_oot_device_tests_run] Cleaned up marker sidecar: $_sidecar"
-    fi
+    done
 }
 trap _cleanup_wrappers EXIT
 
@@ -1182,6 +1181,9 @@ if '_cls_${cls}' in globals():
 import sys as _sys, os as _os
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 
+# Loads the generated __oot_conftest_${original_stem}.py as a plugin -- it isn't named conftest.py, so pytest won't auto-discover it here (outside any repo's tree).
+pytest_plugins = ["__oot_conftest_${original_stem}"]
+
 # Ensure the spyre tests directory is on sys.path before any torch imports.
 # torch.testing._internal.common_device_type uses runpy to load
 # TORCH_TEST_DEVICES (oot_test_base_common.py), which imports spyre_*
@@ -1255,6 +1257,13 @@ def _do_pre_import():
             _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '${module_name}.py'),
         )
         _pre_mod = _ilu.module_from_spec(_private_spec)
+        # Register before exec so the synthetic name is importable for as long as
+        # the captured classes live. Their functions keep _pre_mod's dict as
+        # __globals__, and anything that resolves a global through the module name
+        # -- torch.compile, pickle, dataclasses, typing.get_type_hints -- does
+        # importlib.import_module(__globals__['__name__']) and fails on an
+        # unregistered module.
+        _sys.modules[_private_spec.name] = _pre_mod
         _private_spec.loader.exec_module(_pre_mod)
     finally:
         _cdtype.instantiate_device_type_tests = real_fn
@@ -1404,6 +1413,21 @@ import torch.testing._internal.common_utils as _cu
 _dl = getattr(_cu, 'DEVICE_LIST_SUPPORT_PROFILING_TEST', None)
 if _dl is not None and 'privateuse1' not in _dl:
     _cu.DEVICE_LIST_SUPPORT_PROFILING_TEST = list(_dl) + ['privateuse1']
+
+import os
+
+# pytest's own summary only shows the xfail marker's static reason, hiding the actual error -- print it too.
+def _xfail_failure_message(report):
+    longrepr = report.longrepr
+    reprcrash = getattr(longrepr, "reprcrash", None)
+    message = reprcrash.message if reprcrash is not None else str(longrepr)
+    message = " ".join(message.split())
+    return message[:300] + "..." if len(message) > 300 else message
+
+
+def pytest_runtest_logreport(report):
+    if report.when == "call" and report.skipped and getattr(report, "wasxfail", None) is not None:
+        os.write(1, f"  [XFAIL ERROR = {_xfail_failure_message(report)}]\n".encode())
 CONFTEST_EOF
 
     WRAPPER_FILES+=("$wrapper_path" "$conftest_path")
@@ -1448,16 +1472,14 @@ echo ""
 # 12. Run pytest for each file - original / wrapper depending on TestClass
 #
 # After pytest writes the JUnit XML, a Python post-processor injects YAML
-# tags as <properties> elements directly into the XML.
-#
-# Two regex fixes make matching robust:
-#   1. (?<![a-z])name="..."  avoids matching 'name' inside 'classname="..."'
-#   2. yaml_class in classname  handles dotted XML classnames like
-#      "test.test_binary_ufuncs.TestBinaryUfuncsPRIVATEUSE1"
+# tags as <properties> elements directly into the XML. Tests the OOT
+# instantiation never marks (plain pytest files) get their file's
+# testtype__<label> tags here, so every case names the tiers it ran under.
 # ---------------------------------------------------------------------------
 
 _XML_INJECT_PY='
-import sys, re, json, os
+import sys, re, json, os, fnmatch
+import xml.etree.ElementTree as ET
 from pathlib import Path
 try:
     import yaml
@@ -1466,21 +1488,43 @@ except ImportError:
 
 xml_path, yaml_path = sys.argv[1], sys.argv[2]
 
-# Load sidecar written by TorchTestBase.instantiate_test.
+# Sidecars written by TorchTestBase.instantiate_test, one per pytest process.
 # Keys are bare method names matching the XML `name=` attribute exactly.
 # Values are already-merged lists of all tags (YAML tests tags + op__ + dtype__ + module__ markers).
+# Left in place for later shards of the same config; the EXIT trap removes them.
 _sidecar: dict = {}
-_sidecar_path = yaml_path + ".markers.json"
-try:
-    with open(_sidecar_path) as _f:
-        _sidecar = json.load(_f)
-except Exception:
-    pass
+for _sidecar_path in sorted(Path(yaml_path).parent.glob(Path(yaml_path).name + ".markers.*.json")):
+    try:
+        with open(_sidecar_path) as _f:
+            _sidecar.update(json.load(_f))
+    except Exception:
+        pass
 
 # Fallback YAML-only tag_map for tests not in sidecar
 data = yaml.safe_load(open(yaml_path)) or {}
+suite_cfg = data.get("test_suite_config", {}) or {}
+
+def _testtype_tags(labels):
+    safe = (re.sub(r"[^a-zA-Z0-9_]", "_", str(l)).strip("_") for l in labels or [])
+    return {f"testtype__{l}" for l in safe if l}
+
+# Same precedence as TEST_SUITE_LABELS: a merged config carries labels per file.
+suite_testtypes = _testtype_tags(suite_cfg.get("labels"))
+file_testtypes = {}
+for fe in suite_cfg.get("files", []) or []:
+    stem = Path(str(fe.get("path", ""))).stem
+    if stem and fe.get("labels"):
+        file_testtypes[stem] = _testtype_tags(fe["labels"])
+
+def _file_testtypes(classname):
+    for part in classname.split("."):
+        for stem, tags in file_testtypes.items():
+            if part == stem or part.startswith(stem + "__"):
+                return tags
+    return suite_testtypes
+
 tag_map: dict = {}
-for fe in data.get("test_suite_config", {}).get("files", []):
+for fe in suite_cfg.get("files", []):
     for te in fe.get("tests", []):
         tags = sorted(set(te.get("tags", []) or []))
         if not tags:
@@ -1489,6 +1533,18 @@ for fe in data.get("test_suite_config", {}).get("files", []):
             name = name.strip()
             if name:
                 tag_map.setdefault(name, set()).update(tags)
+
+# YAML names are literal, regex (LxPlanning.*) or glob (*TestModule*). The XML name
+# carries variant suffixes, so a method pattern need only match its start.
+def _matches(pattern, value, prefix=False):
+    if value.startswith(pattern) if prefix else value == pattern:
+        return True
+    if fnmatch.fnmatchcase(value, pattern + "*" if prefix else pattern):
+        return True
+    try:
+        return bool((re.match if prefix else re.fullmatch)(pattern, value))
+    except re.error:
+        return False
 
 def _all_tags(classname, testname):
     # Sidecar has the full merged tag list -- use it when available.
@@ -1501,60 +1557,30 @@ def _all_tags(classname, testname):
             yaml_class, yaml_method = yaml_name.split("::", 1)
         else:
             yaml_class, yaml_method = "", yaml_name
-        if ((yaml_class and yaml_method
-                and yaml_class in classname
-                and testname.startswith(yaml_method))
-                or (yaml_method and not yaml_class
-                    and testname.startswith(yaml_method))):
+        if yaml_method and _matches(yaml_method, testname, prefix=True) and (
+                not yaml_class or yaml_class in classname
+                or any(_matches(yaml_class, part) for part in classname.split("."))):
             matched.update(tags)
     return sorted(matched)
 
-def build_props(tags):
-    return "<properties>" + "".join(
-        f"<property name=\"tag\" value=\"{t}\"/>" for t in tags
-    ) + "</properties>"
-
-def inject_full(m):
-    attrs, content = m.group(1), m.group(2)
-    cn = re.search(r"classname=\"([^\"]*)\"", attrs)
-    tn = re.search(r"(?<![a-z])name=\"([^\"]*)\"", attrs)
-    if not cn or not tn:
-        return m.group(0)
-    tags = _all_tags(cn.group(1), tn.group(1))
+tree = ET.parse(xml_path)
+for tc in tree.getroot().iter("testcase"):
+    cn, tn = tc.get("classname", ""), tc.get("name", "")
+    if not tn:
+        continue
+    tags = set(_all_tags(cn, tn))
+    if not any(t.startswith("testtype__") for t in tags):
+        tags |= _file_testtypes(cn)
     if not tags:
-        return m.group(0)
-    if "<properties>" in content:
-        existing = set(re.findall(r"<property name=\"tag\" value=\"([^\"]*)\"/>", content))
-        new_props = "".join(
-            f"<property name=\"tag\" value=\"{t}\"/>"
-            for t in tags if t not in existing
-        )
-        if not new_props:
-            return m.group(0)
-        content = content.replace("</properties>", new_props + "</properties>", 1)
-        return f"<testcase{attrs}>{content}</testcase>"
-    return f"<testcase{attrs}>{build_props(tags)}{content}</testcase>"
-
-def inject_self_closing(m):
-    attrs = m.group(1)
-    cn = re.search(r"classname=\"([^\"]*)\"", attrs)
-    tn = re.search(r"(?<![a-z])name=\"([^\"]*)\"", attrs)
-    if not cn or not tn:
-        return m.group(0)
-    tags = _all_tags(cn.group(1), tn.group(1))
-    if not tags:
-        return m.group(0)
-    return f"<testcase{attrs}>{build_props(tags)}</testcase>"
-
-xml = Path(xml_path).read_text()
-xml = re.sub(r"<testcase([^>]*)>(.*?)</testcase>", inject_full,        xml, flags=re.DOTALL)
-xml = re.sub(r"<testcase([^>]*?)/>",               inject_self_closing, xml)
-Path(xml_path).write_text(xml)
-
-try:
-    os.remove(_sidecar_path)
-except OSError:
-    pass
+        continue
+    props = tc.find("properties")
+    if props is None:
+        props = ET.Element("properties")
+        tc.insert(0, props)
+    existing = {p.get("value") for p in props.findall("property") if p.get("name") == "tag"}
+    for t in sorted(tags - existing):
+        ET.SubElement(props, "property", name="tag", value=t)
+tree.write(xml_path, encoding="utf-8", xml_declaration=True)
 
 print(f"[torch_oot_device_tests_run] Tags injected into XML: {xml_path}", flush=True)
 '
@@ -1691,53 +1717,44 @@ _parse_pytest_summary_line() {
 # XML shard merger: combines N JUnit XML files (each produced by a separate
 # pytest run) into one, summing suite-level counters and concatenating all
 # <testcase> elements (which already carry their injected <properties> tags).
+# Parsed, not regex-matched: a self-closing <testcase/> followed by a full one
+# otherwise matches both patterns and lands in the output twice.
 # ---------------------------------------------------------------------------
 _XML_MERGE_PY='
-import sys, re
-from pathlib import Path
+import sys
+import xml.etree.ElementTree as ET
 
 out_path    = sys.argv[1]
 shard_paths = sys.argv[2:]
 
-all_cases   = []
-total_tests = 0
-total_err   = 0
-total_fail  = 0
-total_skip  = 0
-total_time  = 0.0
-
-def _attr(xml, name, default="0"):
-    m = re.search(rf"{name}=\"([^\"]*)\"", xml)
-    return m.group(1) if m else default
+counters = {"tests": 0, "errors": 0, "failures": 0, "skipped": 0}
+total_time = 0.0
+merged_suite = ET.Element("testsuite", name="pytest")
 
 for sp in shard_paths:
-    txt = Path(sp).read_text()
-    suite_m = re.search(r"<testsuite([^>]*)>", txt)
-    if suite_m:
-        attrs = suite_m.group(1)
-        total_tests += int(_attr(attrs, "tests"))
-        total_err   += int(_attr(attrs, "errors"))
-        total_fail  += int(_attr(attrs, "failures"))
-        total_skip  += int(_attr(attrs, "skipped"))
+    try:
+        root = ET.parse(sp).getroot()
+    except ET.ParseError as e:
+        print(f"[torch_oot_device_tests_run] WARNING: skipping unparsable shard {sp}: {e}", file=sys.stderr)
+        continue
+    for suite in root.iter("testsuite"):
+        for k in counters:
+            counters[k] += int(suite.get(k, "0") or 0)
         try:
-            total_time += float(_attr(attrs, "time", "0"))
+            total_time += float(suite.get("time", "0") or 0)
         except ValueError:
             pass
-    # Collect full and self-closing <testcase> blocks.
-    blocks  = re.findall(r"<testcase[^>]*>.*?</testcase>", txt, re.DOTALL)
-    blocks += re.findall(r"<testcase[^>]*/>",              txt)
-    all_cases.extend(blocks)
+        for k in ("timestamp", "hostname"):
+            if suite.get(k) and merged_suite.get(k) is None:
+                merged_suite.set(k, suite.get(k))
+        merged_suite.extend(suite.findall("testcase"))
 
-merged = (
-    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
-    "<testsuites>"
-    f"<testsuite name=\"pytest\" tests=\"{total_tests}\" "
-    f"errors=\"{total_err}\" failures=\"{total_fail}\" "
-    f"skipped=\"{total_skip}\" time=\"{total_time:.3f}\">"
-    + "\n".join(all_cases)
-    + "</testsuite></testsuites>"
-)
-Path(out_path).write_text(merged)
+for k, v in counters.items():
+    merged_suite.set(k, str(v))
+merged_suite.set("time", f"{total_time:.3f}")
+root = ET.Element("testsuites")
+root.append(merged_suite)
+ET.ElementTree(root).write(out_path, encoding="utf-8", xml_declaration=True)
 print(f"[torch_oot_device_tests_run] Merged {len(shard_paths)} XML shard(s) -> {out_path}", flush=True)
 '
 
@@ -1836,7 +1853,8 @@ _run_pytest_isolated() {
             # SIGKILL if the agent ignores SIGTERM).
             _DIST_RUN_TIMEOUT="${TORCH_SPYRE_DIST_RUN_TIMEOUT:-30m}"
             _DIST_KILL_AFTER="${TORCH_SPYRE_DIST_KILL_AFTER:-30s}"
-            _run_cmd "${_tmo[@]+"${_tmo[@]}"}" timeout --kill-after="${_DIST_KILL_AFTER}" "${_DIST_RUN_TIMEOUT}" \
+            # --foreground: without it, torchrun ends up outside the stall-watcher's killable process group (see serial `timeout` call below).
+            _run_cmd "${_tmo[@]+"${_tmo[@]}"}" timeout --foreground --kill-after="${_DIST_KILL_AFTER}" "${_DIST_RUN_TIMEOUT}" \
                 torchrun --nproc-per-node "$_NPROC" --no-python bash "${_dir}/split_output.sh" python3 -u -m pytest "$_base" "${_args[@]}"
 
             # split_output.sh tees only rank 0 to stdout, so on failure the
@@ -1877,7 +1895,8 @@ _run_pytest_isolated() {
             _SERIAL_KILL_AFTER="${TORCH_SPYRE_SERIAL_KILL_AFTER:-30s}"
             _serial_tmo=()
             if [[ -n "$_SERIAL_RUN_TIMEOUT" ]] && command -v timeout >/dev/null 2>&1; then
-                _serial_tmo=(timeout --kill-after="$_SERIAL_KILL_AFTER" "$_SERIAL_RUN_TIMEOUT")
+                # --foreground: without it, `timeout` reparents pytest into a new pgid the stall-watcher's -pgid kill can't reach, leaking the VFIO fd.
+                _serial_tmo=(timeout --foreground --kill-after="$_SERIAL_KILL_AFTER" "$_SERIAL_RUN_TIMEOUT")
             fi
             _run_cmd "${_tmo[@]+"${_tmo[@]}"}" "${_serial_tmo[@]+"${_serial_tmo[@]}"}" python3 -m pytest "$_base" "${_args[@]}"
         fi
@@ -1955,7 +1974,8 @@ _run_xdist_fallback() {
     local _xdist_out_tmp="/tmp/_spyre_xdist_out_${$}_$$.tmp"
     if [[ -n "$_fb_timeout" && "$_fb_timeout" != "0" ]] && command -v timeout >/dev/null 2>&1; then
         echo "[torch_oot_device_tests_run]     Retry bounded to ${_fb_timeout} (wedged-device guard)."
-        _OOT_TIMEOUT_PREFIX=("timeout" "--signal=KILL" "$_fb_timeout")
+        # --foreground: this prefix wraps the calls above, so it needs the same fix or it reintroduces the escape one level up.
+        _OOT_TIMEOUT_PREFIX=("timeout" "--foreground" "--signal=KILL" "$_fb_timeout")
     else
         _OOT_TIMEOUT_PREFIX=()
     fi
@@ -2010,9 +2030,11 @@ _run_xdist_fallback() {
         OVERALL_EXIT=$_xexit
     fi
 
-    # Inject XML tags into the shard produced by the xdist run.
+    # Inject XML tags into the shard produced by the xdist run, and mark it a retry: the
+    # re-run overwrote the first attempt's XML.
     if [[ -n "$_shard_xml" && -f "$_shard_xml" ]]; then
         python3 -c "$_XML_INJECT_PY" "$_shard_xml" "$YAML_CONFIG" || true
+        python3 "${_SCRIPT_DIR}/utils/mark_retried.py" signal "$_shard_xml" || true
     fi
 }
 
@@ -2101,9 +2123,17 @@ except Exception as e:
 # ---------------------------------------------------------------------------
 _run_parallel_across_cards() {
     local _n_cards="$1"
+    # The caller now passes only the RUN_FILES indices eligible for round-robin (distributed tests are excluded, see below).
+    shift
+    local -a _target_idx=("$@")
+    # An empty target set (e.g. a distributed-only invocation) means there is nothing to parallelize.
+    if [[ ${#_target_idx[@]} -eq 0 ]]; then
+        echo "[torch_oot_device_tests_run_parallel] No non-distributed files to parallelize -- skipping."
+        return
+    fi
 
     echo ""
-    echo "[torch_oot_device_tests_run_parallel] --parallel: collecting test IDs from ${#RUN_FILES[@]} file(s) to distribute across ${_n_cards} card(s)..."
+    echo "[torch_oot_device_tests_run_parallel] --parallel: collecting test IDs from ${#_target_idx[@]} file(s) to distribute across ${_n_cards} card(s)..."
 
     # Timestamp the collection phase so its cost is visible in the run log.
     # Collection re-imports torch + each OOT wrapper per file, so this phase
@@ -2161,24 +2191,53 @@ _run_parallel_across_cards() {
     # Fan out collection: one background probe per file, bounded to _n_cards
     # concurrent jobs. Each writes matched node IDs to _collect_out_files[i].
     local -a _collect_out_files=()
+    # Parallel array to _collect_out_files, indexed the same way, holding each probe's stderr path.
+    local -a _collect_err_files=()
+    # Parallel array holding each probe's own exit code, to catch a signal kill (e.g. OOM) even when stdout/stderr are both empty.
+    local -a _collect_exit_files=()
     local -a _collect_pids=()
-    for i in "${!RUN_FILES[@]}"; do
+    # Only walk the non-distributed subset handed in by the caller, not every resolved file.
+    for i in "${_target_idx[@]}"; do
         local _rf="${RUN_FILES[$i]}"
         local _rd _rb
         _rd="$(dirname "$_rf")"
         _rb="$(basename "$_rf")"
         local _cout="/tmp/_spyre_collect_ids_${$}_${i}.tmp"
-        _collect_out_files+=("$_cout")
+        # Assigned by RUN_FILES index, not appended -- _target_idx can skip values (distributed files excluded), so a plain += would misalign once any index is missing.
+        _collect_out_files[$i]="$_cout"
+        # Captured instead of discarded, so a probe that collects nothing can say why.
+        local _cerr="/tmp/_spyre_collect_err_${$}_${i}.tmp"
+        _collect_err_files[$i]="$_cerr"
+        # Same index-alignment reasoning as _collect_out_files above.
+        local _cexit="/tmp/_spyre_collect_exit_${$}_${i}.tmp"
+        _collect_exit_files[$i]="$_cexit"
 
         echo "[torch_oot_device_tests_run]   collecting: $(basename "${TEST_FILES[$i]}")"
 
         (
+            # A 0-match --collect-only (or a killed probe) is expected/handled below, not a script-ending error.
+            set +euo pipefail
             export SPYRE_TEST_FILE="$_rf"
             export OOT_TEST_FILE="$_rf"
+            # Give this probe its own Inductor cache dir so concurrent collect-only imports
+            # don't share cache state. Bucketed by the same concurrency bound as the probe
+            # throttle (not by file), so only _n_cards dirs ever exist -- keying by file index
+            # instead was tried and measurably slower (every probe pays a cold-cache setup
+            # cost instead of most reusing an already-warmed slot's dir), without actually
+            # preventing failures: the same handful of heavy-import files still failed on a
+            # contended first attempt even with fully unique dirs, and it was the retry below
+            # (a fresh, less-contended attempt -- not cache-dir isolation) that reliably saved
+            # them. So slot bucketing stays naive here; a same-slot collision, if it ever
+            # happens, is caught by that retry instead of prevented up front.
+            _probe_base_cache="${TORCHINDUCTOR_CACHE_DIR:-/tmp/torchinductor_${USER:-$(id -un)}}"
+            _probe_slot=$(( i % _n_cards ))
+            export TORCHINDUCTOR_CACHE_DIR="${_probe_base_cache}__collect_slot${_probe_slot}"
             cd "$_rd" && python3 -m pytest "$_rb" \
                 "${_collect_args[@]+"${_collect_args[@]}"}" \
-                --collect-only -q --no-header 2>/dev/null \
-            | grep '\.py::' > "$_cout" || true
+                --collect-only -q --no-header 2>"$_cerr" \
+            | grep '\.py::' > "$_cout"
+            # python3's own exit code (PIPESTATUS[0], not grep's), so a signal kill shows up even with empty stdout/stderr.
+            echo "${PIPESTATUS[0]}" > "$_cexit"
         ) &
         _collect_pids+=($!)
 
@@ -2193,20 +2252,163 @@ _run_parallel_across_cards() {
         wait "$_cpid" 2>/dev/null || true
     done
 
-    # Read back each file's collected IDs in file order, preserving the exact
-    # ordering the original serial loop produced.
-    for i in "${!RUN_FILES[@]}"; do
-        local _of="${TEST_FILES[$i]}"
+    # Read back each probe's output and figure out which files need a retry (signal-killed
+    # or interrupted -- exit >=128 or exit 2, with empty stdout/stderr, same as before).
+    declare -A _raw_ids_map=()
+    declare -A _err_file_map=()
+    local -a _retry_idx=()
+    for i in "${_target_idx[@]}"; do
         local _cout="${_collect_out_files[$i]}"
+        local _cerr="${_collect_err_files[$i]}"
+        local _cexit="${_collect_exit_files[$i]}"
 
         local _raw_ids=""
         [[ -f "$_cout" ]] && _raw_ids="$(< "$_cout")"
         rm -f "$_cout"
+        _raw_ids_map[$i]="$_raw_ids"
+        _err_file_map[$i]="$_cerr"
+
+        if [[ -z "$_raw_ids" && ! -s "$_cerr" ]]; then
+            local _pexit=""
+            [[ -f "$_cexit" ]] && _pexit="$(< "$_cexit")"
+            if [[ "$_pexit" =~ ^[0-9]+$ && ( "$_pexit" -ge 128 || "$_pexit" -eq 2 ) ]]; then
+                _retry_idx+=("$i")
+                # Keep _collect_exit_files[$i] pointing at the triggering exit file
+                # so the retry log message can report the exact exit code.
+                _collect_exit_files[$i]="$_cexit"
+            fi
+        fi
+    done
+
+    # Retry every still-failing candidate concurrently (with progressively lower concurrency
+    # to reduce memory/import pressure after the first failure), for up to _MAX_RETRY_ROUNDS
+    # rounds.  Worker limit per round:
+    #   round 1  -> _n_cards  (full concurrency; preserves throughput on the first retry)
+    #   round 2  -> ceil(_n_cards / 2)  (half slots)
+    #   round 3+ -> 1  (serial; maximally safe for repeated signal-kill candidates)
+    # The candidate set only shrinks between rounds (a file drops out as soon as it succeeds
+    # or reports a real error), so later rounds cost less than the first, not more.
+    local _MAX_RETRY_ROUNDS=5
+    local _retry_round=0
+    # Declared once outside the loop; reset with plain =() each round inside.
+    # declare -A inside a loop re-initialises (wipes) the array on every iteration
+    # because declare is function-scoped in bash -- the fold loop would always read
+    # empty paths from round N+1 onwards, making every retry round after the first
+    # a silent no-op.
+    declare -A _retry_out_files=()
+    declare -A _retry_err_files=()
+    declare -A _retry_exit_files=()
+    while [[ ${#_retry_idx[@]} -gt 0 && $_retry_round -lt $_MAX_RETRY_ROUNDS ]]; do
+        _retry_round=$(( _retry_round + 1 ))
+        # Derive per-round worker limit: full -> half -> serial.
+        local _retry_workers
+        if   [[ $_retry_round -eq 1 ]]; then
+            _retry_workers=$_n_cards
+        elif [[ $_retry_round -eq 2 ]]; then
+            _retry_workers=$(( (_n_cards + 1) / 2 ))
+        else
+            _retry_workers=1
+        fi
+        echo "[torch_oot_device_tests_run_parallel]   retry round ${_retry_round}/${_MAX_RETRY_ROUNDS}: ${#_retry_idx[@]} candidate(s), workers=${_retry_workers}" >&2
+        _retry_out_files=()
+        _retry_err_files=()
+        _retry_exit_files=()
+        local -a _retry_pids=()
+        for i in "${_retry_idx[@]}"; do
+            local _pexit_prev=""
+            local _cexit_prev="${_collect_exit_files[$i]}"
+            [[ -f "$_cexit_prev" ]] && _pexit_prev="$(< "$_cexit_prev")"
+            echo "[torch_oot_device_tests_run_serial]   $(basename "${TEST_FILES[$i]}") collect-only was signal-killed or interrupted (exit ${_pexit_prev:-unknown}) -- retrying (round ${_retry_round})." >&2
+            local _rf2="${RUN_FILES[$i]}"
+            local _rout="/tmp/_spyre_collect_retry_ids_${$}_${i}.tmp"
+            local _rerr="/tmp/_spyre_collect_retry_err_${$}_${i}.tmp"
+            local _rexit="/tmp/_spyre_collect_retry_exit_${$}_${i}.tmp"
+            _retry_out_files[$i]="$_rout"
+            _retry_err_files[$i]="$_rerr"
+            _retry_exit_files[$i]="$_rexit"
+            (
+                set +euo pipefail
+                export SPYRE_TEST_FILE="$_rf2"
+                export OOT_TEST_FILE="$_rf2"
+                # A dedicated cache dir for the retry too, so it can't collide with whatever else is still running.
+                export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-/tmp/torchinductor_${USER:-$(id -un)}}__retry_${i}"
+                cd "$(dirname "$_rf2")" && python3 -m pytest "$(basename "$_rf2")" \
+                    "${_collect_args[@]+"${_collect_args[@]}"}" \
+                    --collect-only -q --no-header 2>"$_rerr" \
+                | grep '\.py::' > "$_rout"
+                echo "${PIPESTATUS[0]}" > "$_rexit"
+            ) &
+            _retry_pids+=($!)
+            while [[ "$(jobs -rp | wc -l)" -ge "$_retry_workers" ]]; do
+                wait -n 2>/dev/null || true
+            done
+        done
+        for _rpid in "${_retry_pids[@]+"${_retry_pids[@]}"}"; do
+            wait "$_rpid" 2>/dev/null || true
+        done
+
+        # Fold this round's results back in; anything still empty (stdout AND stderr) carries
+        # over into the next round's candidate set instead of a separate serial fallback.
+        local -a _next_retry_idx=()
+        for i in "${_retry_idx[@]}"; do
+            local _rout="${_retry_out_files[$i]}"
+            local _rerr="${_retry_err_files[$i]}"
+            local _rexit="${_retry_exit_files[$i]}"
+            local _raw_ids=""
+            [[ -f "$_rout" ]] && _raw_ids="$(< "$_rout")"
+            rm -f "$_rout"
+            if [[ -n "$_raw_ids" ]]; then
+                echo "[torch_oot_device_tests_run_serial]   retry succeeded for $(basename "${TEST_FILES[$i]}") (round ${_retry_round})." >&2
+                _raw_ids_map[$i]="$_raw_ids"
+                rm -f "$_rerr" "$_rexit"
+            elif [[ -s "$_rerr" ]]; then
+                # The retry's own stderr is more relevant than the original (empty) one if it failed for a different reason.
+                _err_file_map[$i]="$_rerr"
+                # Update to this round's exit code so the finalize block reflects the last attempt, not round 0.
+                rm -f "${_collect_exit_files[$i]}"
+                _collect_exit_files[$i]="$_rexit"
+            else
+                # Still failing: carry over, updating exit code to this round's value.
+                _next_retry_idx+=("$i")
+                rm -f "$_rerr"
+                rm -f "${_collect_exit_files[$i]}"
+                _collect_exit_files[$i]="$_rexit"
+            fi
+        done
+        _retry_idx=("${_next_retry_idx[@]+"${_next_retry_idx[@]}"}")
+    done
+
+    # Finalize in file order, preserving the exact ordering the original serial loop produced.
+    for i in "${_target_idx[@]}"; do
+        local _of="${TEST_FILES[$i]}"
+        local _raw_ids="${_raw_ids_map[$i]}"
+        local _cerr="${_err_file_map[$i]}"
+        local _cexit="${_collect_exit_files[$i]}"
 
         if [[ -z "$_raw_ids" ]]; then
             echo "[torch_oot_device_tests_run_serial]   WARNING: no test IDs collected from $(basename "$_of") -- it will be skipped in parallel mode." >&2
+            # The probe's own stderr is the only record of why -- print it here instead of losing it.
+            if [[ -s "$_cerr" ]]; then
+                echo "[torch_oot_device_tests_run_serial]   ----- collect-only stderr for $(basename "$_of") -----" >&2
+                sed 's/^/[torch_oot_device_tests_run_serial]   /' "$_cerr" >&2
+                echo "[torch_oot_device_tests_run_serial]   ----- end stderr -----" >&2
+            else
+                # Empty stdout AND empty stderr means the probe never got to print anything -- almost
+                # always a signal kill (SIGKILL/OOM being the common case), not a catchable Python error.
+                local _pexit=""
+                [[ -f "$_cexit" ]] && _pexit="$(< "$_cexit")"
+                if [[ "$_pexit" =~ ^[0-9]+$ && "$_pexit" -ge 128 ]]; then
+                    echo "[torch_oot_device_tests_run_serial]   collect-only produced no stderr either -- python3 exited with code ${_pexit} (signal $(( _pexit - 128 )), likely OOM-killed if that's SIGKILL/9)." >&2
+                elif [[ "$_pexit" == "2" ]]; then
+                    echo "[torch_oot_device_tests_run_serial]   collect-only produced no stderr either -- python3 exit code: 2 (pytest: collection interrupted, e.g. an import/collection error), even after ${_MAX_RETRY_ROUNDS} retry round(s)." >&2
+                else
+                    echo "[torch_oot_device_tests_run_serial]   collect-only produced no stderr either -- python3 exit code: ${_pexit:-unknown}." >&2
+                fi
+            fi
+            rm -f "$_cerr" "$_cexit"
             continue
         fi
+        rm -f "$_cerr" "$_cexit"
 
         while IFS= read -r _id; do
             [[ -z "$_id" ]] && continue
@@ -2228,7 +2430,8 @@ _run_parallel_across_cards() {
     done
 
     local _collect_elapsed=$(( SECONDS - _collect_start ))
-    echo "[torch_oot_device_tests_run_parallel] Collection phase completed in ${_collect_elapsed}s (${#RUN_FILES[@]} file(s), up to ${_n_cards} concurrent probe(s))."
+    # Report against the actual candidate set rather than every resolved file, now that distributed files are routed elsewhere.
+    echo "[torch_oot_device_tests_run_parallel] Collection phase completed in ${_collect_elapsed}s (${#_target_idx[@]} file(s), up to ${_n_cards} concurrent probe(s))."
 
     local _total="${#_all_node_ids[@]}"
     if [[ $_total -eq 0 ]]; then
@@ -2499,6 +2702,7 @@ _run_parallel_across_cards() {
                                 fi
                                 if [[ -n "$_shard_xml" && -f "$_shard_xml" ]]; then
                                     python3 -c "$_XML_INJECT_PY" "$_shard_xml" "$YAML_CONFIG" || true
+                                    python3 "${_SCRIPT_DIR}/utils/mark_retried.py" signal "$_shard_xml" || true
                                 fi
                                 # Accumulate counts from xdist retry output.
                                 if [[ ${#YAML_CONFIGS[@]} -ge 2 && -f "$_xdist_par_out" ]]; then
@@ -2647,6 +2851,21 @@ _run_parallel_across_cards() {
 # ---------------------------------------------------------------------------
 # 13. Parallel or serial execution
 # ---------------------------------------------------------------------------
+# Collective-comm tests need torchrun to assign RANK/WORLD_SIZE per rank, so they can't be split as independent single-card pytest runs the way --parallel splits everything else.
+_DIST_FILE_IDX=()
+# Everything that isn't a distributed test stays eligible for the round-robin card split.
+_NONDIST_FILE_IDX=()
+# Classify every resolved file once, up front, so both execution paths below agree on the split.
+for i in "${!RUN_FILES[@]}"; do
+    _fdir="$(dirname "${RUN_FILES[$i]}")"
+    # Mirrors the distributed check _run_pytest_isolated already uses to decide when to invoke torchrun.
+    if [[ "$_fdir" == *"/distributed"* ]] || [[ "$_fdir" == *"/distributed" ]]; then
+        _DIST_FILE_IDX+=("$i")
+    else
+        _NONDIST_FILE_IDX+=("$i")
+    fi
+done
+
 if [[ $_PARALLEL -eq 1 ]]; then
     _N_CARDS=$(_detect_spyre_card_count)
     echo "[torch_oot_device_tests_run_info] Detected ${_N_CARDS} Spyre card(s)."
@@ -2656,11 +2875,19 @@ if [[ $_PARALLEL -eq 1 ]]; then
     fi
 fi
 
-if [[ $_PARALLEL -eq 1 ]]; then
-    _run_parallel_across_cards "$_N_CARDS"
-else
+# Only the non-distributed subset ever goes through the round-robin card split.
+if [[ $_PARALLEL -eq 1 && ${#_NONDIST_FILE_IDX[@]} -gt 0 ]]; then
+    _run_parallel_across_cards "$_N_CARDS" "${_NONDIST_FILE_IDX[@]}"
+fi
 
-for i in "${!RUN_FILES[@]}"; do
+# Distributed files always run here via the torchrun-aware path; everything runs here when --parallel was never requested.
+if [[ $_PARALLEL -eq 1 ]]; then
+    _SERIAL_FILE_IDX=("${_DIST_FILE_IDX[@]+"${_DIST_FILE_IDX[@]}"}")
+else
+    _SERIAL_FILE_IDX=("${!RUN_FILES[@]}")
+fi
+
+for i in "${_SERIAL_FILE_IDX[@]+"${_SERIAL_FILE_IDX[@]}"}"; do
     run_file="${RUN_FILES[$i]}"
     original_file="${TEST_FILES[$i]}"
     run_dir="$(dirname "$run_file")"
@@ -2850,8 +3077,6 @@ for i in "${!RUN_FILES[@]}"; do
     esac
 done
 
-fi  # end of serial-vs-parallel branch
-
 # ---------------------------------------------------------------------------
 # Merge all XML shards into the final output path requested by the caller.
 # ---------------------------------------------------------------------------
@@ -2936,10 +3161,22 @@ echo "========================================================================"
 if [[ ${#_FILE_SUMMARY_LABELS[@]} -eq 0 ]]; then
     echo "  (no file results recorded)"
 else
+    _tot_passed=0
+    _tot_failed=0
+    _tot_error=0
+    _tot_skipped=0
+    _tot_xfailed=0
+    _tot_xpassed=0
     for _fi in "${!_FILE_SUMMARY_LABELS[@]}"; do
         _flbl="${_FILE_SUMMARY_LABELS[$_fi]}"
         _fstat="${_FILE_SUMMARY_STATUS[$_fi]}"
         read -r _fp _ff _fe _fs _fxf _fxp _ft <<< "${_FILE_SUMMARY_COUNTS[$_fi]}"
+        _tot_passed=$(( _tot_passed + ${_fp:-0} ))
+        _tot_failed=$(( _tot_failed + ${_ff:-0} ))
+        _tot_error=$(( _tot_error + ${_fe:-0} ))
+        _tot_skipped=$(( _tot_skipped + ${_fs:-0} ))
+        _tot_xfailed=$(( _tot_xfailed + ${_fxf:-0} ))
+        _tot_xpassed=$(( _tot_xpassed + ${_fxp:-0} ))
         _fparts=()
         [[ "${_fp:-0}"  -gt 0 ]] && _fparts+=("${_fp} passed")
         [[ "${_ff:-0}"  -gt 0 ]] && _fparts+=("${_ff} failed")
@@ -2961,8 +3198,12 @@ else
         fi
         printf "  %-8s  %-52s  %s\n" "$_fstat" "$_flbl" "$_fsummary"
     done
+    _tot_all=$(( _tot_passed + _tot_failed + _tot_error + _tot_skipped + _tot_xfailed + _tot_xpassed ))
 fi
 echo "========================================================================"
+if [[ ${#_FILE_SUMMARY_LABELS[@]} -gt 0 ]]; then
+    echo "[torch_oot_device_tests_run] Totals: ${_tot_all} tests (${_tot_passed} passed, ${_tot_failed} failed, ${_tot_error} error, ${_tot_skipped} skipped, ${_tot_xpassed} xpassed, ${_tot_xfailed} xfailed)"
+fi
 
 # ---------------------------------------------------------------------------
 # Failed test names — printed when any failures were recorded.
