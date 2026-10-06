@@ -72,7 +72,7 @@ class SpyreStream {
                const flex::CompositeAddress* device_address, bool to_device,
                std::optional<flex::Range> range = std::nullopt) const;
   // Host-side compute for deeptools host compute calls.
-  void launchHostCompute(flex::HostComputeParams*) const;
+  flex::HostComputeBuffer* launchHostCompute(flex::HostComputeParams*) const;
 
   // Conversions
   c10::Stream unwrap() const;

@@ -279,9 +279,12 @@ void SpyreStream::copyRaw(const flex::SharedPool& pool, size_t slot_id,
                           std::optional<flex::Range> range) const {
   resolveRuntimeHandle()->copyRaw(pool, slot_id, device_address, to_device,
                                   range);
+  
 void SpyreStream::launchHostCompute(flex::HostComputeParams* params) const {
+flex::HostComputeBuffer* SpyreStream::launchHostCompute(
+    flex::HostComputeParams* params) const {
   RECORD_FUNCTION("launch::HostCompute", {});
-  resolveRuntimeHandle()->launchHostCompute(params);
+  return resolveRuntimeHandle()->launchHostCompute(params);
 }
 
 void SpyreStream::launch(const JobPlan& plan,
