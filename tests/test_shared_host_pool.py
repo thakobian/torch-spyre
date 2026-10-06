@@ -61,6 +61,20 @@ class TestSharedHostPool(TestCase):
         with self.assertRaises(RuntimeError):
             SharedHostPool.create_or_attach(self.id(), 10, 10)
 
+    def test_slot_count_mismatch(self):
+        pool = SharedHostPool.create_or_attach(self.id(), 5, 5)
+
+        # Same slot size, different slot count -> must raise
+        with self.assertRaises(RuntimeError):
+            SharedHostPool.create_or_attach(self.id(), 10, pool.slot_bytes())
+
+    def test_slot_bytes_mismatch(self):
+        pool = SharedHostPool.create_or_attach(self.id(), 5, 5)
+
+        # Same slot count, different aligned stride -> must raise
+        with self.assertRaises(RuntimeError):
+            SharedHostPool.create_or_attach(self.id(), 5, pool.slot_bytes() * 2)
+
     def test_no_host_pointer(self):
         # Create a shared pool
         shared_pool = SharedHostPool.create_or_attach(self.id(), 5, 5)
