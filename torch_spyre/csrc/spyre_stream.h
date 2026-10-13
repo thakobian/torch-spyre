@@ -68,15 +68,13 @@ class SpyreStream {
   // conversion internally (no FillParams construction here).
   void fillAsync(const flex::CompositeAddress* dst, double value,
                  DataFormats dtype, bool use_dmai) const;
-  void copyRaw(const flex::SharedPool& pool, size_t slot_id,
-               const flex::CompositeAddress* device_address, bool to_device,
-               std::optional<flex::Range> range = std::nullopt) const;
+  void launchCopyRaw(flex::CopyRawParams* params) const;
 
   // Conversions
   c10::Stream unwrap() const;
 
-  // Returns the error state of this stream without exposing the underlying
-  // flex::RuntimeStream handle to callers.
+  // Returns the error state of this stream without exposing the
+  // underlying flex::RuntimeStream handle to callers.
   SpyreStreamError getError() const;
 
  private:

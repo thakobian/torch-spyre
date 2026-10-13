@@ -697,7 +697,10 @@ void copy_kv_page_raw(const at::Tensor& cache, size_t block_id,
 
   const flex::Range range = derive_kv_page_range(cache, block_id);
 
-  stream.copyRaw(pool, slot_id, composite_address, to_device, range);
+  auto* params = flex::createCopyRawParams(&pool, slot_id, composite_address,
+                                           to_device, range);
+  stream.launchCopyRaw(params);
+  flex::destroyCopyRawParams(params);
 
   if (!non_blocking) {
     stream.synchronize();
