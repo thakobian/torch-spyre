@@ -68,7 +68,11 @@ class SpyreStream {
   // conversion internally (no FillParams construction here).
   void fillAsync(const flex::CompositeAddress* dst, double value,
                  DataFormats dtype, bool use_dmai) const;
+
   void launchCopyRaw(flex::CopyRawParams* params) const;
+
+  // Host-side compute for deeptools host compute calls.
+  flex::HostComputeBuffer* launchHostCompute(flex::HostComputeParams*) const;
 
   // Conversions
   c10::Stream unwrap() const;

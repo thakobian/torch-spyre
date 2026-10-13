@@ -300,7 +300,6 @@ class TestSpyre(TestCase):
             subtest(
                 (torch.int64, lambda: torch.tensor(10, dtype=torch.int64), None),
                 name="int64",
-                decorators=[_SCALAR_ADD_XFAIL_TO_DTYPE],
             ),
             subtest(
                 (torch.uint8, lambda: torch.tensor(10, dtype=torch.uint8), None),
@@ -669,6 +668,25 @@ class TestSpyre(TestCase):
             torch.tensor([[5, 6, 7, 8]] * 3, dtype=torch.float16),
         )
 
+        data = [
+            [float(i) for i in range(0, 20)],
+            [float(i) for i in range(20, 40)],
+            [float(i) for i in range(40, 60)],
+            [float(i) for i in range(60, 80)],
+        ]
+
+        # Slice then expand to original sizes: destination sizes == source sizes
+        # exercises the edge case where the device tensor sizes and dma_sizes
+        # have the same number of elements yet the sizes represent a expanded
+        # slice and the dma_sizes represent the original data.
+        base = torch.tensor(data, dtype=torch.float16, device="spyre")
+        sliced_expanded = base[1:2].expand(4, 20)
+        self.assertEqual(sliced_expanded.storage_offset(), 20)
+        self.assertEqual(
+            sliced_expanded.cpu(),
+            torch.tensor([data[1]] * 4, dtype=torch.float16),
+        )
+
     def test_d2h_copy_of_strided_slice(self):
         """D2H of a strided slice (e.g. t[::2]) must produce the slice's
         logical values, not over-DMA the parent's full allocation."""
@@ -818,6 +836,216 @@ class TestSpyre(TestCase):
             # H2D: Expect error when moving to Spyre with unsupported dst_dtype
             with self.assertRaises(RuntimeError):
                 tensor.to("spyre", dtype=dst_dtype)
+
+    def test_d2d_dtype_conversion_overloads(self):
+        """Dtype-only ``Tensor.to`` overloads use the compiled D2D conversion.
+
+        In particular, ``x.to(torch.float32)`` must recognize its first
+        positional argument as a dtype rather than raw-copying bf16 bits into
+        an fp32 allocation. D2D conversions produce a staggered element
+        arrangement, so convert back to the source dtype before comparing on
+        CPU.
+        """
+        from torch_spyre._C import ElementArrangement, get_spyre_tensor_layout
+
+        pairs = (
+            (torch.float16, torch.float32),
+            (torch.bfloat16, torch.float32),
+            (torch.float32, torch.float16),
+            (torch.float32, torch.bfloat16),
+        )
+
+        for src_dtype, dst_dtype in pairs:
+            base_cpu = torch.linspace(-4, 4, 512, dtype=src_dtype).reshape(4, 128)
+            source_cpu = base_cpu[1:3]
+            source = base_cpu.to("spyre")[1:3]
+            self.assertEqual(source.storage_offset(), 128)
+            expected = source_cpu.to(dst_dtype).to(src_dtype)
+            other = torch.empty_like(source, dtype=dst_dtype)
+            expected_ea = (
+                ElementArrangement.DL16_TO_FP32
+                if dst_dtype == torch.float32
+                else ElementArrangement.FP32_TO_DL16
+            )
+
+            conversions = (
+                ("positional dtype", lambda: source.to(dst_dtype)),
+                ("keyword dtype", lambda: source.to(dtype=dst_dtype)),
+                ("device and dtype", lambda: source.to("spyre", dtype=dst_dtype)),
+                ("other tensor", lambda: source.to(other)),
+            )
+            for overload, convert in conversions:
+                with self.subTest(
+                    src_dtype=src_dtype,
+                    dst_dtype=dst_dtype,
+                    overload=overload,
+                ):
+                    actual = convert()
+                    self.assertEqual(actual.device.type, "spyre")
+                    self.assertEqual(actual.dtype, dst_dtype)
+                    self.assertEqual(
+                        get_spyre_tensor_layout(actual).element_arrangement,
+                        expected_ea,
+                    )
+                    restored = actual.to(src_dtype)
+                    self.assertEqual(
+                        get_spyre_tensor_layout(restored).element_arrangement,
+                        ElementArrangement.STANDARD,
+                    )
+                    atol, rtol = (
+                        (1e-2, 1.6e-2)
+                        if torch.bfloat16 in (src_dtype, dst_dtype)
+                        else (1e-3, 1e-3)
+                    )
+                    torch.testing.assert_close(
+                        restored.cpu(), expected, atol=atol, rtol=rtol
+                    )
+
+    def test_unsupported_d2d_dtype_conversion_falls_back(self):
+        """Unsupported native D2D pairs retain the CPU fallback behavior."""
+        from torch_spyre._C import ElementArrangement, get_spyre_tensor_layout
+        from torch_spyre.ops.fallbacks import FallbackWarning
+
+        source_cpu = torch.arange(128, dtype=torch.int32).reshape(2, 64)
+        source = source_cpu.to("spyre")
+
+        with self.assertWarnsRegex(
+            FallbackWarning,
+            r"conversion from torch\.int32 to torch\.float16 is falling back to cpu",
+        ):
+            actual = source.to(torch.float16)
+
+        self.assertEqual(actual.dtype, torch.float16)
+        self.assertEqual(
+            get_spyre_tensor_layout(actual).element_arrangement,
+            ElementArrangement.STANDARD,
+        )
+        torch.testing.assert_close(actual.cpu(), source_cpu.to(torch.float16))
+
+    @parametrize(
+        "sizes",
+        [
+            [4, 8, 16, 60],
+            [8, 10, 30, 64],
+            [9, 15, 35, 100],
+        ],
+    )
+    def test_h2d_copy_to_sliced_destination(self, sizes):
+        """H2D to a slice (e.g. t[:2]) must write to the slice's logical
+        value."""
+        x = torch.rand(
+            sizes,
+            dtype=torch.float16,
+            device="spyre",
+        )
+
+        slice_sizes = [2, sizes[1], sizes[2], sizes[3]]
+        y = torch.rand(
+            slice_sizes,
+            dtype=torch.float16,
+            device="cpu",
+        )
+        x[:2] = y
+        self.assertEqual(x.cpu()[:2], y, atol=1e-3, rtol=1e-3)
+
+        slice_sizes = [1, sizes[1], sizes[2], sizes[3]]
+        y = torch.rand(
+            slice_sizes,
+            dtype=torch.float16,
+            device="cpu",
+        )
+        x[2:3] = y
+        self.assertEqual(x.cpu()[2:3], y, atol=1e-3, rtol=1e-3)
+
+        slice_sizes = [sizes[1], sizes[2], sizes[3]]
+        y = torch.rand(
+            slice_sizes,
+            dtype=torch.float16,
+            device="cpu",
+        )
+        x[3] = y
+        self.assertEqual(x.cpu()[3], y, atol=1e-3, rtol=1e-3)
+
+        slice_sizes = [2, sizes[2], sizes[3]]
+        y = torch.rand(
+            slice_sizes,
+            dtype=torch.float16,
+            device="cpu",
+        )
+        x[3, :2] = y
+        self.assertEqual(x.cpu()[3, :2], y, atol=1e-3, rtol=1e-3)
+
+        slice_sizes = [1, sizes[2], sizes[3]]
+        y = torch.rand(
+            slice_sizes,
+            dtype=torch.float16,
+            device="cpu",
+        )
+        x[3, 2:3] = y
+        self.assertEqual(x.cpu()[3, 2:3], y, atol=1e-3, rtol=1e-3)
+
+        slice_sizes = [sizes[2], sizes[3]]
+        y = torch.rand(
+            slice_sizes,
+            dtype=torch.float16,
+            device="cpu",
+        )
+        x[3, 3] = y
+        self.assertEqual(x.cpu()[3, 3], y, atol=1e-3, rtol=1e-3)
+
+        slice_sizes = [2, sizes[3]]
+        y = torch.rand(
+            slice_sizes,
+            dtype=torch.float16,
+            device="cpu",
+        )
+        x[3, 3, :2] = y
+        self.assertEqual(x.cpu()[3, 3, :2], y, atol=1e-3, rtol=1e-3)
+
+        slice_sizes = [1, sizes[3]]
+        y = torch.rand(
+            slice_sizes,
+            dtype=torch.float16,
+            device="cpu",
+        )
+        x[3, 3, 2:3] = y
+        self.assertEqual(x.cpu()[3, 3, 2:3], y, atol=1e-3, rtol=1e-3)
+
+        slice_sizes = [sizes[3]]
+        y = torch.rand(
+            slice_sizes,
+            dtype=torch.float16,
+            device="cpu",
+        )
+        x[3, 3, 3] = y
+        self.assertEqual(x.cpu()[3, 3, 3], y, atol=1e-3, rtol=1e-3)
+
+        slice_sizes = [2]
+        y = torch.rand(
+            slice_sizes,
+            dtype=torch.float16,
+            device="cpu",
+        )
+        x[3, 3, 3, :2] = y
+        self.assertEqual(x.cpu()[3, 3, 3, :2], y, atol=1e-3, rtol=1e-3)
+
+        slice_sizes = [1]
+        y = torch.rand(
+            slice_sizes,
+            dtype=torch.float16,
+            device="cpu",
+        )
+        x[3, 3, 3, 2:3] = y
+        self.assertEqual(x.cpu()[3, 3, 3, 2:3], y, atol=1e-3, rtol=1e-3)
+
+        slice_sizes = []
+        y = torch.rand(
+            slice_sizes,
+            dtype=torch.float16,
+            device="cpu",
+        )
+        x[3, 3, 3, 3] = y
+        self.assertEqual(x.cpu()[3, 3, 3, 3], y, atol=1e-3, rtol=1e-3)
 
 
 if __name__ == "__main__":

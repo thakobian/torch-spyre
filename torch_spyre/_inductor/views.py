@@ -494,32 +494,8 @@ class Term:
     dim_size: sympy.Expr
     offset: sympy.Expr = sympy.S.Zero  # offset
 
-
-def normalize_coordinates(
-    var_ranges: dict[sympy.Symbol, sympy.Expr],
-    size: Sequence[sympy.Expr],
-    coordinates: Sequence[sympy.Expr],
-    synthetic_var_fn: Callable[[], sympy.Symbol],
-    indirect_sizes: "dict[sympy.Symbol, int] | None" = None,
-    compare_value: Callable[[sympy.Expr], int | float] = _concretize_for_cmp,
-) -> list[Term]:
-    """
-    Normalize coordinate expressions obtained from compute_coordinates.
-
-    If mod is absent from term assume term does not overflow dim_size.
-    Assume num or den is 1.
-
-    Break each expression into list of terms.
-    If expr has no mod, use var_range instead.
-
-    Split dimension into n dimensions if expression has n>1 terms.
-    Split dim_size into n according to iteration range of each term.
-    Fuse contiguous dimensions if corresponding terms can be fused.  Size-1
-    device dims with a constant zero coordinate are dropped, and do not stop
-    the dims on either side of them from fusing.
-    """
-
-    def normalize_var_expr(term, var, var_range, dim_size):
+    @staticmethod
+    def from_coordinate(term, var, var_range, dim_size):
         """Convert one single-variable coordinate term to ``Term``.
 
         ``Mod(FloorDiv(var, divisor), radix)`` is one digit of a
@@ -564,6 +540,31 @@ def normalize_coordinates(
             modulus,
             dim_size,
         )
+
+
+def normalize_coordinates(
+    var_ranges: dict[sympy.Symbol, sympy.Expr],
+    size: Sequence[sympy.Expr],
+    coordinates: Sequence[sympy.Expr],
+    synthetic_var_fn: Callable[[], sympy.Symbol],
+    indirect_sizes: "dict[sympy.Symbol, int] | None" = None,
+    compare_value: Callable[[sympy.Expr], int | float] = _concretize_for_cmp,
+) -> list[Term]:
+    """
+    Normalize coordinate expressions obtained from compute_coordinates.
+
+    If mod is absent from term assume term does not overflow dim_size.
+    Assume num or den is 1.
+
+    Break each expression into list of terms.
+    If expr has no mod, use var_range instead.
+
+    Split dimension into n dimensions if expression has n>1 terms.
+    Split dim_size into n according to iteration range of each term.
+    Fuse contiguous dimensions if corresponding terms can be fused.  Size-1
+    device dims with a constant zero coordinate are dropped, and do not stop
+    the dims on either side of them from fusing.
+    """
 
     # terms in non-increasing stride order
     terms = []
@@ -612,7 +613,7 @@ def normalize_coordinates(
 
             # extract term for each var
             term = expr.xreplace({v: 0 for v in vars - {var}}) - offset
-            dim_terms.append(normalize_var_expr(term, var, var_range, dim_size))
+            dim_terms.append(Term.from_coordinate(term, var, var_range, dim_size))
         # sort dim_terms in increasing (num, mod) order so that z + offset
         # vars (num=1, mod=1) always sort before real iteration vars (num=1, mod=N)
         # when num is equal
@@ -626,6 +627,9 @@ def normalize_coordinates(
         for dim_term in dim_terms[::-1]:
             dim_term.offset = offset // dim_term.num
             offset %= dim_term.num
+        # Whatever is left is smaller than the smallest stride; it is placed
+        # inside the gap dim realized for that term below.
+        residual_offset = offset
 
         # split dims with n>1 terms
         split_dim_terms = []
@@ -656,6 +660,59 @@ def normalize_coordinates(
 
         # accumulate terms in reverse order to ensure non-increasing device strides
         terms += reversed(split_dim_terms)
+
+        # The innermost term is the only one that can still carry num > 1 (the
+        # loop above resets num for every other term): its variable steps over
+        # ``num`` elements of the device dim per iteration, e.g. ``2*d1`` from a
+        # stick-aligned slice of a stick dim that a view split in two, or from
+        # ``x[..., ::2, :]``.  Realize that stride as an explicit inner gap dim
+        # of size ``num`` so the address arithmetic stays exact:
+        #
+        # - the term's own extent must then be counted in iterations of its
+        #   variable.  For a lone term ``dim_size`` is still in device units,
+        #   so divide it by ``num`` -- leaving it inflates the dim, and with it
+        #   every outer stride (issue #4050: output row l read input row 2*l).
+        #   With several terms the split loop already sized it in iterations.
+        # - a residual constant offset below the stride (``2*d1 + 1``) selects
+        #   the position inside the gap.  Like any other constant offset on a
+        #   non-stick dim it needs a variable to hang off, so mint a synthetic
+        #   size-1 variable the same way the elided-dimension case above does.
+        #
+        # The stick dim (last coordinate) is left alone: within-stick strides
+        # are not representable and are rejected downstream.
+        inner = split_dim_terms[0]
+        if inner.num > 1 and dim_idx != len(size) - 1:
+            stride = inner.num
+            inner.num = sympy.S.One
+            if len(split_dim_terms) == 1:
+                if inner.dim_size % stride != 0:
+                    raise Unsupported(
+                        f"strided coordinate {coordinate} walks a dim of size "
+                        f"{dim_size} in steps of {stride}, which does not divide it"
+                    )
+                inner.dim_size //= stride
+            if residual_offset == 0:
+                terms.append(Term(None, None, None, None, stride))
+            else:
+                var = synthetic_var_fn()
+                var_ranges[var] = 1
+                terms.append(
+                    Term(
+                        sympy.S.One,
+                        sympy.S.One,
+                        var,
+                        sympy.S.One,
+                        stride,
+                        residual_offset,
+                    )
+                )
+        elif residual_offset != 0:
+            # Only a within-stick stride can get here (``2*d + 1`` on the stick
+            # dim); there is no gap dim to place the residual in.
+            raise Unsupported(
+                f"coordinate {coordinate} on dim {dim_idx} has offset "
+                f"{residual_offset} below its stride, which cannot be addressed"
+            )
 
     # fuse contiguous dimensions when possible
     # never fuse last dimension = stick dimension!
@@ -727,6 +784,27 @@ class AlignmentInputs:
     repeat_info: dict[sympy.Symbol, dict]
     concrete_ranges: dict[sympy.Symbol, int | float]
     restored_ranges: dict[sympy.Symbol, sympy.Expr | int | float]
+
+
+class UnalignedStickSplit(Unsupported):
+    """A global alignment boundary cuts through one tensor's physical stick."""
+
+    def __init__(
+        self,
+        tensor_index: int,
+        variable: sympy.Symbol,
+        boundary: int,
+        stick_size: int,
+    ) -> None:
+        self.tensor_index = tensor_index
+        self.variable = variable
+        self.boundary = boundary
+        self.stick_size = stick_size
+        super().__init__(
+            "tensor alignment boundary "
+            f"{boundary} for {variable} cuts tensor {tensor_index}'s "
+            f"physical stick of {stick_size} elements"
+        )
 
 
 def build_alignment_inputs(
@@ -881,6 +959,37 @@ def align_tensors_pure(
     # sort splits
     splits = {var: sorted(val) for var, val in splits.items()}
 
+    # When a tensor has the canonical pair of an outer-stick coordinate and an
+    # innermost stick coordinate for the same variable, every interior boundary
+    # must fall between physical sticks.  A boundary inside a stick cannot be
+    # represented as a device dimension: the outer-stick adjustment below would
+    # truncate it to zero (for example 16 // 32), or to an incorrect nonzero
+    # extent (for example 48 // 32).  Do not apply this restriction merely
+    # because the innermost coordinate uses the variable: arbitrary coordinate
+    # expressions in preceding dimensions can legally split it at other points.
+    # The final boundary is the logical range endpoint, so a partial last stick
+    # (for example 7 int32 elements in a 32-element stick) remains valid.
+    for tensor_index, (terms, var, physical_stick_size) in enumerate(
+        zip(all_terms, stick_dim, stick_size)
+    ):
+        if var is None:
+            # A constant/broadcast innermost coordinate has no stick loop to split.
+            continue
+        has_outer_stick_coordinate = any(
+            term.var == var and term.den == physical_stick_size for term in terms[:-1]
+        )
+        if not has_outer_stick_coordinate:
+            continue
+        for boundary_expr in splits[var][1:-1]:
+            boundary = _concrete_alignment_value(boundary_expr)
+            if boundary % int(physical_stick_size) != 0:
+                raise UnalignedStickSplit(
+                    tensor_index,
+                    var,
+                    int(boundary),
+                    int(physical_stick_size),
+                )
+
     # create new vars, var ranges, and work division for each variable
     # with one var per segment (split[i], split[i+1])
     new_var_ranges = {}
@@ -978,10 +1087,9 @@ def align_tensors_pure(
                 size[-1] //= den
                 (offset, term) = coordinates[-1].as_coeff_Add()
                 coordinates[-1] = term // den + offset
-            if num > 1:
-                # iteration skips over elements in dim, realize gap as new dimension
-                size.append(num)
-                coordinates.append(sympy.S.Zero)
+            # normalize_coordinates realizes any stride (num > 1) on a
+            # non-stick dim as an explicit gap term, so nothing is left here.
+            assert num == 1, f"unexpected stride {num} on non-stick term for {var}"
         # add stick dim
         num, den, var, mod, dim_size, offset = astuple(terms[-1])
         size.append(dim_size)
@@ -1095,17 +1203,26 @@ def tiling_expr_to_device_expr(
     out = sympy.S.Zero
     n = len(stride_map)
     vars = index.free_symbols
+    terms = index.args if isinstance(index, sympy.Add) else (index,)
     for var in vars:
-        # index.xreplace({var: 1}) can degenerate to the bare Python int 1
-        # (not sympy.Integer(1)) when `index` is itself exactly the single
-        # symbol being replaced (e.g. index == var, coefficient 1, no other
-        # additive term) -- sympy auto-simplifies Mul(1, var) to var, and
-        # substituting var -> 1 into var alone returns the literal object
-        # passed in. sympy.sympify coerces that raw int back to a proper
-        # sympy numeric type so the second .xreplace call below (which
-        # every other, non-degenerate case already returns) does not crash
-        # with "'int' object has no attribute 'xreplace'".
-        step = sympy.sympify(index.xreplace({var: 1})).xreplace({v: 0 for v in vars})
+        # step must be var's own coefficient, not index's value at var=1 --
+        # those only coincide when index has zero constant term. `index` can
+        # legitimately carry one here: _general_tile_advance builds it from
+        # dep.index, which bakes in literal offsets from Python-level slicing
+        # (e.g. key[..., start:end, :] for KV-block >= 1 contributes a
+        # constant +start*row_stride term alongside the tiled-dim symbol).
+        # Evaluating at var=1 folded that unrelated constant straight into
+        # the per-level advance coefficient (issue: S=128 flash-attention,
+        # second head-tile group's second KV block reading the wrong head).
+        # Isolate var's own additive term first (mirrors coeff_through_floor
+        # in pass_utils.py -- not reused directly to avoid a views<->pass_utils
+        # import cycle), then take its coefficient, looking through one
+        # floor() layer since a term can be floor(k*var/d).
+        own_term = next((t for t in terms if var in t.free_symbols), sympy.S.Zero)
+        if isinstance(own_term, sympy.floor):
+            step = own_term.args[0].coeff(var)
+        else:
+            step = own_term.coeff(var)
         j = -1  # device dimension for var
         for i in range(n):
             if (
