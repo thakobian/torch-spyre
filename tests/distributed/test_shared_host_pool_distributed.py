@@ -19,7 +19,15 @@ import torch
 import torch.distributed as dist
 from torch.testing._internal.common_utils import TestCase, run_tests
 
-from torch_spyre._C import SharedHostPool  # type: ignore[attr-defined]
+from torch_spyre._C import (  # type: ignore[attr-defined]
+    PoolConfig,
+    PoolStatus,
+    attach_pool,
+    create_pool,
+    destroy_pool,
+    detach_pool,
+    open_pool,
+)
 
 # Skip all tests if RANK is not defined, or WORLD_SIZE is not set or less than 2
 if "RANK" not in os.environ:
@@ -76,33 +84,37 @@ class TestSharedHostPoolCrossProcess(TestCase):
 
     def test_cross_process_shared_pool(self):
         """
-        A pool created in one process can be attached by name in another, with
-        matching geometry.
+        A pool created by one process (the delegator) can be opened by name and
+        attached in another, with matching geometry.
         """
         num_slots = 1
         slot_bytes = 10
         name = self.id()
 
         if self.comm_rank == 0:
-            # Process 0: create the shared host pool.
-            pool = SharedHostPool.create_or_attach(name, num_slots, slot_bytes)
-            self.assertIsNotNone(pool)
+            # Process 0 acts as the delegator: create the pool, never attach.
+            config = PoolConfig(name, num_slots, slot_bytes)
+            status, descriptor = create_pool(config)
+            self.assertEqual(status, PoolStatus.Ok)
 
         dist.barrier()  # Ensure process 0 has created the pool
 
         if self.comm_rank == 1:
-            # Process 1: attach the same pool and confirm its geometry.
-            pool = SharedHostPool.create_or_attach(name, num_slots, slot_bytes)
+            # Process 1 only knows the name: open the pool, then attach it.
+            status, descriptor = open_pool(name)
+            self.assertEqual(status, PoolStatus.Ok)
+            status, pool = attach_pool(descriptor)
+            self.assertEqual(status, PoolStatus.Ok)
             self.assertEqual(pool.slot_count(), num_slots)
             self.assertEqual(pool.name(), name)
             self.assertEqual(pool.total_bytes(), pool.slot_count() * pool.slot_bytes())
-            # Attaching with a different slot count only raises if this process
-            # truly attached to process 0's pool.
-            with self.assertRaises(RuntimeError):
-                SharedHostPool.create_or_attach(name, num_slots + 1, slot_bytes)
+            detach_pool(pool)
 
-        # Keep process 0's pool alive until process 1 is done with it.
-        dist.barrier()
+        dist.barrier()  # Ensure process 1 has detached
+
+        if self.comm_rank == 0:
+            # Nobody is attached anymore, so the delegator can destroy the pool.
+            self.assertEqual(destroy_pool(descriptor), PoolStatus.Ok)
 
 
 if __name__ == "__main__":

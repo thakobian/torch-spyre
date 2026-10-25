@@ -29,7 +29,7 @@
 #include <cstdlib>     // std::getenv
 #include <filesystem>  // NOLINT(build/c++17)
 #include <flex/flex.hpp>
-#include <flex/memory_interface/shared_host_pool.hpp>
+#include <flex/memory_interface/pool_lifecycle.hpp>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -298,34 +298,112 @@ PYBIND11_MODULE(_C, m) {
 
   py::class_<spyre::SpyreTensorLayout> dci_cls(m, "SpyreTensorLayout");
 
-  py::class_<flex::SharedPool>(m, "SharedPool")
+  py::enum_<flex::PoolBackend>(m, "PoolBackend")
+      .value("HostDram", flex::PoolBackend::HostDram);
+
+  py::enum_<flex::PoolState>(m, "PoolState")
+      .value("Initializing", flex::PoolState::Initializing)
+      .value("Ready", flex::PoolState::Ready)
+      .value("Destroying", flex::PoolState::Destroying);
+
+  py::enum_<flex::PoolStatus>(m, "PoolStatus")
+      .value("Ok", flex::PoolStatus::Ok)
+      .value("NotFound", flex::PoolStatus::NotFound)
+      .value("AlreadyExists", flex::PoolStatus::AlreadyExists)
+      .value("Initializing", flex::PoolStatus::Initializing)
+      .value("Destroying", flex::PoolStatus::Destroying)
+      .value("PoolBusy", flex::PoolStatus::PoolBusy)
+      .value("StaleGeneration", flex::PoolStatus::StaleGeneration)
+      .value("ConfigurationMismatch", flex::PoolStatus::ConfigurationMismatch)
+      .value("ResourceError", flex::PoolStatus::ResourceError);
+
+  // PoolConfig has no constructor, so build it in a factory. compatibility
+  // is an opaque tag; expose it as bytes rather than pybind's list[int].
+  py::class_<flex::PoolConfig>(m, "PoolConfig")
+      .def(py::init([](std::string name, size_t num_slots, size_t slot_bytes,
+                       flex::PoolBackend backend,
+                       const py::bytes& compatibility) {
+             flex::PoolConfig config;
+             config.name = std::move(name);
+             config.backend = backend;
+             config.num_slots = num_slots;
+             config.slot_bytes = slot_bytes;
+             const std::string tag = compatibility;
+             config.compatibility.assign(tag.begin(), tag.end());
+             return config;
+           }),
+           py::arg("name"), py::arg("num_slots"), py::arg("slot_bytes"),
+           py::arg("backend") = flex::PoolBackend::HostDram,
+           py::arg("compatibility") = py::bytes())
+      .def_readwrite("name", &flex::PoolConfig::name)
+      .def_readwrite("backend", &flex::PoolConfig::backend)
+      .def_readwrite("num_slots", &flex::PoolConfig::num_slots)
+      .def_readwrite("slot_bytes", &flex::PoolConfig::slot_bytes)
+      .def_property(
+          "compatibility",
+          [](const flex::PoolConfig& config) {
+            return py::bytes(
+                reinterpret_cast<const char*>(config.compatibility.data()),
+                config.compatibility.size());
+          },
+          [](flex::PoolConfig& config, const py::bytes& compatibility) {
+            const std::string tag = compatibility;
+            config.compatibility.assign(tag.begin(), tag.end());
+          });
+
+  // Only returned by create_pool()/open_pool(); never built in Python.
+  py::class_<flex::PoolDescriptor>(m, "PoolDescriptor")
+      .def_readonly("name", &flex::PoolDescriptor::name)
+      .def_readonly("generation", &flex::PoolDescriptor::generation)
+      .def_readonly("state", &flex::PoolDescriptor::state)
+      .def_readonly("config", &flex::PoolDescriptor::config);
+
+  // smart_holder lets detach_pool() take the pool's unique_ptr back from
+  // Python, which flex::DetachPool() requires.
+  py::classh<flex::SharedPool>(m, "SharedPool")
       .def("slot_count", &flex::SharedPool::SlotCount)
       .def("slot_bytes", &flex::SharedPool::SlotBytes)
       .def("name", &flex::SharedPool::Name)
       .def("total_bytes", &flex::SharedPool::TotalBytes);
 
-  py::class_<flex::SharedHostPool, flex::SharedPool>(m, "SharedHostPool")
-      .def_static(
-          "create_or_attach",
-          [](const std::string& name, size_t num_slots, size_t slot_bytes) {
-            spyre::startRuntime();
-            // CreateOrAttach() can block while another process initializes
-            // the pool, so release the GIL for it.
-            py::gil_scoped_release release;
-            return flex::SharedHostPool::CreateOrAttach(
-                spyre::GlobalRuntime::get(), name, num_slots, slot_bytes);
-          },
-          py::arg("name"), py::arg("num_slots"), py::arg("slot_bytes"))
-      .def_static(
-          "unlink_by_name", &flex::SharedHostPool::UnlinkByName,
-          "Unlink the named pool's shm names, both the data segment and "
-          "its .ctl segment. The memory itself survives until the last "
-          "attacher closes it, and this ignores the attach refcount, so "
-          "it is only for test cleanup or recovering from a crashed "
-          "owner. Do not call it while a live pool with the same name "
-          "may exist, or later attachers will create and join a "
-          "different backing segment.",
-          py::arg("name"), py::call_guard<py::gil_scoped_release>());
+  // Delegator side: no device needed. CreatePool() and DestroyPool() wait on
+  // a per-name lock another process may hold, so release the GIL.
+  m.def(
+      "create_pool",
+      [](const flex::PoolConfig& config) {
+        py::gil_scoped_release release;
+        auto result = flex::CreatePool(config);
+        return std::make_pair(result.status, result.descriptor);
+      },
+      py::arg("config"));
+  m.def(
+      "open_pool",
+      [](const std::string& name) {
+        py::gil_scoped_release release;
+        auto result = flex::OpenPool(name);
+        return std::make_pair(result.status, result.descriptor);
+      },
+      py::arg("name"));
+  m.def("destroy_pool", &flex::DestroyPool, py::arg("descriptor"),
+        py::call_guard<py::gil_scoped_release>());
+
+  // Worker side: attaching pins the data segment for this process's device.
+  m.def(
+      "attach_pool",
+      [](const flex::PoolDescriptor& descriptor) {
+        spyre::startRuntime();
+        flex::AttachResult result;
+        {
+          // Reacquire the GIL before building the Python tuple below.
+          py::gil_scoped_release release;
+          result = flex::AttachPool(spyre::GlobalRuntime::get(), descriptor);
+        }
+        return py::make_tuple(result.status, std::move(result.pool));
+      },
+      py::arg("descriptor"));
+  // Takes the pool's unique_ptr out of the Python object (see SharedPool
+  // above); any later use of that object raises.
+  m.def("detach_pool", &flex::DetachPool, py::arg("pool"));
 
   dci_cls.def_readonly("device_size", &spyre::SpyreTensorLayout::device_size)
       .def_readonly("stride_map", &spyre::SpyreTensorLayout::stride_map)

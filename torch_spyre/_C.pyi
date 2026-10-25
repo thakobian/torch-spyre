@@ -48,8 +48,17 @@ __all__: list[str] = [
     "spyre_empty_with_layout",
     "start_runtime",
     "to_with_layout",
+    "PoolBackend",
+    "PoolConfig",
+    "PoolDescriptor",
+    "PoolState",
+    "PoolStatus",
     "SharedPool",
-    "SharedHostPool",
+    "attach_pool",
+    "create_pool",
+    "destroy_pool",
+    "detach_pool",
+    "open_pool",
 ]
 
 AIUPTI_ACTIVITY_NAME_MAX_BYTES: int
@@ -522,10 +531,54 @@ class SharedPool:
     def name(self) -> str: ...
     def total_bytes(self) -> int: ...
 
-class SharedHostPool(SharedPool):
-    @staticmethod
-    def create_or_attach(
-        name: str, num_slots: int, slot_bytes: int
-    ) -> SharedHostPool: ...
-    @staticmethod
-    def unlink_by_name(name: str) -> None: ...
+class PoolBackend:
+    HostDram: typing.ClassVar[PoolBackend]
+
+class PoolState:
+    Initializing: typing.ClassVar[PoolState]
+    Ready: typing.ClassVar[PoolState]
+    Destroying: typing.ClassVar[PoolState]
+
+class PoolStatus:
+    Ok: typing.ClassVar[PoolStatus]
+    NotFound: typing.ClassVar[PoolStatus]
+    AlreadyExists: typing.ClassVar[PoolStatus]
+    Initializing: typing.ClassVar[PoolStatus]
+    Destroying: typing.ClassVar[PoolStatus]
+    PoolBusy: typing.ClassVar[PoolStatus]
+    StaleGeneration: typing.ClassVar[PoolStatus]
+    ConfigurationMismatch: typing.ClassVar[PoolStatus]
+    ResourceError: typing.ClassVar[PoolStatus]
+
+class PoolConfig:
+    name: str
+    backend: PoolBackend
+    num_slots: int
+    slot_bytes: int
+    compatibility: bytes
+    def __init__(
+        self,
+        name: str,
+        num_slots: int,
+        slot_bytes: int,
+        backend: PoolBackend = ...,
+        compatibility: bytes = ...,
+    ) -> None: ...
+
+class PoolDescriptor:
+    @property
+    def name(self) -> str: ...
+    @property
+    def generation(self) -> int: ...
+    @property
+    def state(self) -> PoolState: ...
+    @property
+    def config(self) -> PoolConfig: ...
+
+def create_pool(config: PoolConfig) -> tuple[PoolStatus, PoolDescriptor]: ...
+def open_pool(name: str) -> tuple[PoolStatus, PoolDescriptor]: ...
+def destroy_pool(descriptor: PoolDescriptor) -> PoolStatus: ...
+def attach_pool(
+    descriptor: PoolDescriptor,
+) -> tuple[PoolStatus, SharedPool | None]: ...
+def detach_pool(pool: SharedPool) -> None: ...

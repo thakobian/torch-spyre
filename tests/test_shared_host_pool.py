@@ -18,7 +18,16 @@ from torch.testing._internal.common_utils import (
     run_tests,
 )
 
-from torch_spyre._C import SharedHostPool
+from torch_spyre._C import (
+    PoolConfig,
+    PoolState,
+    PoolStatus,
+    attach_pool,
+    create_pool,
+    destroy_pool,
+    detach_pool,
+    open_pool,
+)
 
 # Fixed slot sizes keep this test offline and focused on pool creation and
 # attachment. 128 B is one stick. 256 KiB is 262144 B, and 8 of those slots
@@ -32,52 +41,57 @@ class TestSharedHostPool(TestCase):
     Tests for the SharedHostPool functionality in the torch_spyre module.
     """
 
-    def test_create_or_attach(self):
-        # Create a shared pool
-        shared_pool = SharedHostPool.create_or_attach(self.id(), 5, 5)
+    def _create(self, num_slots=5, slot_bytes=5):
+        status, descriptor = create_pool(PoolConfig(self.id(), num_slots, slot_bytes))
+        self.assertEqual(status, PoolStatus.Ok)
+        # Pools outlive every attachment until destroyed. Cleanups run last-in
+        # first-out, so this runs after any detach registered by _attach().
+        self.addCleanup(destroy_pool, descriptor)
+        return descriptor
+
+    def _attach(self, descriptor):
+        status, pool = attach_pool(descriptor)
+        self.assertEqual(status, PoolStatus.Ok)
+        self.addCleanup(detach_pool, pool)
+        return pool
+
+    def test_create_and_attach(self):
+        # Create a shared pool; it is attachable as soon as create returns
+        descriptor = self._create()
+        self.assertEqual(descriptor.state, PoolState.Ready)
+
+        shared_pool = self._attach(descriptor)
 
         # Check if slot count is as expected
         self.assertEqual(shared_pool.slot_count(), 5)
 
-        # Check if greater than or equal because the actual slot bytes may be
-        # larger due to alignment of size/stride of the pool
+        # Check if greater than or equal because slot bytes are rounded up to
+        # the host page size
         self.assertGreaterEqual(shared_pool.slot_bytes(), 5)
 
-    def test_attach_existing_pool(self):
-        # Create a shared pool and assign to _ to keep it alive
-        _ = SharedHostPool.create_or_attach(self.id(), 5, 5)
+    def test_multiple_attachments(self):
+        descriptor = self._create()
 
-        # Attach to the existing shared pool
-        shared_pool_compare = SharedHostPool.create_or_attach(self.id(), 5, 5)
+        # Attach to the same pool twice
+        first = self._attach(descriptor)
+        second = self._attach(descriptor)
 
-        self.assertEqual(shared_pool_compare.slot_count(), 5)
-        self.assertGreaterEqual(shared_pool_compare.slot_bytes(), 5)
+        self.assertEqual(second.slot_count(), 5)
+        self.assertGreaterEqual(second.slot_bytes(), 5)
+        # Both handles read the same rounded size from the pool
+        self.assertEqual(second.slot_bytes(), first.slot_bytes())
 
-    def test_geometry_mismatch(self):
-        # Create a shared pool and assign to _ to keep it alive
-        _ = SharedHostPool.create_or_attach(self.id(), 5, 5)
+    def test_create_existing_pool(self):
+        self._create(5, 5)
 
-        # Attempt to attach to the existing shared pool with different geometry
-        with self.assertRaises(RuntimeError):
-            SharedHostPool.create_or_attach(self.id(), 10, 10)
-
-    def test_slot_count_mismatch(self):
-        pool = SharedHostPool.create_or_attach(self.id(), 5, 5)
-
-        # Same slot size, different slot count -> must raise
-        with self.assertRaises(RuntimeError):
-            SharedHostPool.create_or_attach(self.id(), 10, pool.slot_bytes())
-
-    def test_slot_bytes_mismatch(self):
-        pool = SharedHostPool.create_or_attach(self.id(), 5, 5)
-
-        # Same slot count, different aligned stride -> must raise
-        with self.assertRaises(RuntimeError):
-            SharedHostPool.create_or_attach(self.id(), 5, pool.slot_bytes() * 2)
+        # The name is taken, so a second create fails even with a different
+        # geometry; it never resizes or replaces the existing pool
+        status, _ = create_pool(PoolConfig(self.id(), 10, 10))
+        self.assertEqual(status, PoolStatus.AlreadyExists)
 
     def test_no_host_pointer(self):
-        # Create a shared pool
-        shared_pool = SharedHostPool.create_or_attach(self.id(), 5, 5)
+        # Create and attach a shared pool
+        shared_pool = self._attach(self._create())
 
         # Confirm that the shared pool does not have a host pointer attribute
         self.assertFalse(hasattr(shared_pool, "slot_ptr"))
@@ -85,9 +99,7 @@ class TestSharedHostPool(TestCase):
     def test_pool_small_slot(self):
         """Many small slots, one stick each."""
         slot_count = 512
-        shared_pool = SharedHostPool.create_or_attach(
-            self.id(), slot_count, SMALL_SLOT_BYTES
-        )
+        shared_pool = self._attach(self._create(slot_count, SMALL_SLOT_BYTES))
 
         self.assertEqual(shared_pool.slot_count(), slot_count)
         self.assertGreaterEqual(shared_pool.slot_bytes(), SMALL_SLOT_BYTES)
@@ -95,29 +107,84 @@ class TestSharedHostPool(TestCase):
     def test_pool_large_slot(self):
         """A multi MB pool, 8 slots of 256 KiB."""
         slot_count = 8
-        shared_pool = SharedHostPool.create_or_attach(
-            self.id(), slot_count, LARGE_SLOT_BYTES
-        )
+        shared_pool = self._attach(self._create(slot_count, LARGE_SLOT_BYTES))
 
         self.assertEqual(shared_pool.slot_count(), slot_count)
         self.assertGreaterEqual(shared_pool.slot_bytes(), LARGE_SLOT_BYTES)
 
     def test_name(self):
-        # Create a shared pool
-        shared_pool = SharedHostPool.create_or_attach(self.id(), 5, 5)
+        # Create and attach a shared pool
+        shared_pool = self._attach(self._create())
 
         # Check if name is as expected
         self.assertEqual(shared_pool.name(), self.id())
 
     def test_total_bytes(self):
-        # Create a shared pool
-        shared_pool = SharedHostPool.create_or_attach(self.id(), 5, 5)
+        # Create and attach a shared pool
+        shared_pool = self._attach(self._create())
 
         # Check if total bytes are as expected
         self.assertEqual(
             shared_pool.total_bytes(),
             shared_pool.slot_count() * shared_pool.slot_bytes(),
         )
+
+    def test_open_pool(self):
+        descriptor = self._create()
+
+        # Opening by name finds the same pool, not just one with that name
+        status, opened = open_pool(self.id())
+        self.assertEqual(status, PoolStatus.Ok)
+        self.assertEqual(opened.generation, descriptor.generation)
+
+    def test_open_missing_pool(self):
+        status, _ = open_pool(self.id())
+        self.assertEqual(status, PoolStatus.NotFound)
+
+    def test_destroy_while_attached(self):
+        descriptor = self._create()
+        self._attach(descriptor)
+
+        # An attached process blocks destroy, which leaves the pool as is
+        self.assertEqual(destroy_pool(descriptor), PoolStatus.PoolBusy)
+
+    def test_detach_then_destroy(self):
+        descriptor = self._create()
+
+        # Attach without _attach(), since this test detaches by hand
+        status, pool = attach_pool(descriptor)
+        self.assertEqual(status, PoolStatus.Ok)
+        detach_pool(pool)
+
+        # With no one attached, destroy succeeds and the pool is gone
+        self.assertEqual(destroy_pool(descriptor), PoolStatus.Ok)
+        status, _ = open_pool(self.id())
+        self.assertEqual(status, PoolStatus.NotFound)
+
+    def test_stale_generation(self):
+        old = self._create()
+        self.assertEqual(destroy_pool(old), PoolStatus.Ok)
+
+        # Re-creating the name gives the new pool a new generation
+        self._create()
+
+        # The old descriptor can neither attach to nor destroy the new pool
+        status, pool = attach_pool(old)
+        self.assertEqual(status, PoolStatus.StaleGeneration)
+        self.assertIsNone(pool)
+        self.assertEqual(destroy_pool(old), PoolStatus.StaleGeneration)
+
+    def test_use_after_detach_raises(self):
+        descriptor = self._create()
+
+        # Attach without _attach(), since this test detaches by hand
+        status, pool = attach_pool(descriptor)
+        self.assertEqual(status, PoolStatus.Ok)
+        detach_pool(pool)
+
+        # detach_pool() took the pool out of the handle, so it can't be used
+        with self.assertRaises(ValueError):
+            pool.slot_count()
 
 
 if __name__ == "__main__":
