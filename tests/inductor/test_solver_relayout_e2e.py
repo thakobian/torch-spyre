@@ -37,13 +37,14 @@ import torch
 import torch_spyre  # noqa: F401
 from torch_spyre._inductor import config
 from torch_spyre._inductor.scratchpad import allocator as alloc_mod
+from torch_spyre._inductor.scratchpad.ilp_solver_ortools import CpSatLayoutSolver
 
 
 _COOPT = {"co_optimizing_lx_planning": True, "layout_solver": "cpsat"}
 
 
-def _no_matches(self, consumer_op, consumer_divs, parent_names, *args, **kwargs):
-    return {parent: [] for parent in parent_names}
+def _no_matches(self, edges, *args, **kwargs):
+    return {parent: [] for parent in edges}
 
 
 class _Observed:
@@ -81,6 +82,7 @@ class _Observed:
         # plan edge -> materialized copy buffer name, and each consumer's read
         # names right after materialization (V.graph is live inside the pass).
         self.copies: dict = {}
+        self.source_layouts: dict = {}
         self.consumer_reads: dict[str, set[str]] = {}
         real_materialize = alloc_mod.materialize_lx_relayouts
 
@@ -101,6 +103,12 @@ class _Observed:
                 for edge, (copy_name, _plan) in materialized_lx_relayouts(graph).items()
             }
             for plan in plans:
+                layout = graph.get_buffer(plan.source_name).get_layout()
+                self.source_layouts[plan.edge] = (
+                    list(layout.device_layout.device_size),
+                    list(layout.device_layout.stride_map),
+                    list(layout.stride),
+                )
                 for name in plan.consumer_names:
                     op = graph.get_buffer(name)
                     self.consumer_reads[name] = {
@@ -266,11 +274,13 @@ def test_solver_relayout_materializes_and_runs(monkeypatch):
 
 
 def test_an_unsupporting_solver_materializes_nothing(monkeypatch):
-    """``lx_solver_relayout()`` says whether the configured solver decides
+    """The solver's ``decides_lx_relayouts()`` says whether it decides
     relayouts; when it does not, no candidate is enumerated and the
     co-optimizing solve is exactly what it was before this feature."""
     observed = _arm_forced(monkeypatch)
-    monkeypatch.setattr(alloc_mod, "lx_solver_relayout", lambda: False)
+    monkeypatch.setattr(
+        CpSatLayoutSolver, "decides_lx_relayouts", classmethod(lambda cls: False)
+    )
 
     def fn(t):
         return torch.relu(torch.neg(t)) + 1.0
@@ -390,60 +400,45 @@ def test_gather_respects_shuffle_register_budget(monkeypatch, fragments):
     torch.testing.assert_close(out.cpu(), fn(hx, hw), rtol=2e-2, atol=2e-2)
 
 
-def _prices_replicated_reads() -> bool:
-    """Whether the cost model charges a replicated matmul operand per replica core
-    (#4454). Without it the demoted bmm's re-read of a broadcast operand is priced
-    once at the shared peak, ~312 ns here against a ~208 ns shuffle after the
-    overlap discount, so the solver correctly declines the wrong comparison."""
-    import dataclasses
-
-    from torch_spyre._inductor.cost_model import ArgTraffic
-
-    return "replication" in {f.name for f in dataclasses.fields(ArgTraffic)}
-
-
-@pytest.mark.parametrize(
-    "kind",
-    [
-        "gather",
-        pytest.param(
-            "broadcast",
-            marks=pytest.mark.xfail(
-                not _prices_replicated_reads(),
-                strict=True,
-                reason="broadcast admission needs #4454's replicated-read pricing",
-            ),
-        ),
-    ],
-)
+@pytest.mark.parametrize("kind", ["gather", "broadcast"])
 def test_grouped_relayout_fires_under_cpsat(monkeypatch, kind):
     """#3440's grouped fixtures decided by the solver instead of the greedy
     collector (see ``relayout_fixtures.grouped_relayout_graph``). Hints pin both
     divisions, so no slicing match exists and the solver either buys the
     grouped movement or demotes ``hidden`` to HBM, where every replica core
     re-reads its slice (#4454 prices that). The only patches are read-only
-    spies; the parity spy checks the committed collector certifies the same
-    edge, and #3440's payload check that the emitted op runs in LX."""
-    from torch_spyre._inductor.scratchpad.lx_relayout import _core_slices
+    spies.
 
+    Frontend checks (no native-output validation):
+    - assert_emitted_in_lx verifies that exactly one plan was produced, no
+    group was demoted by the scheduler, the solver's planned (source,
+    destination) LX address pair matches the pair emitted by codegen, exactly
+    one shuffle op was recorded by spyre_kernel, and every plan consumer
+    reads the materialized copy buffer.
+    - The parity sub-check runs the committed collector on the same committed
+    graph and verifies the same edge with matching core count, work-slice
+    partition, and per-endpoint LX footprint.
+    - plan.num_cores and destination_view.num_cores match the fixture's
+    source_cores / destination_cores expectations, verifying that the
+    solver preserves the core counts from the grouped graph.
+    - _core_slices owner-set sizes match src_owners / dst_owners,
+    verifying the physical partitioning at the source and destination.
+
+    Numerical check:
+    torch.testing.assert_close compares the device output, moved to CPU
+    float, against the fixture reference (rtol=2e-2, atol=2e-1)."""
+
+    from torch_spyre._inductor.scratchpad.lx_relayout import _core_slices
     from relayout_fixtures import grouped_relayout_graph
-    from utils_inductor import (
-        assert_lx_only_relayout_payload,
-        capture_backend_output_dirs,
-    )
 
     observed = _Observed(monkeypatch, force=False)
     fn, args, reference, expect = grouped_relayout_graph(kind)
-    with (
-        config.patch({**_COOPT, "sencores": 32}),
-        capture_backend_output_dirs() as dirs,
-    ):
+    with config.patch({**_COOPT, "sencores": 32}):
         out = torch.compile(fn, dynamic=False, options={"epilogue_fusion": False})(
             *args
         )
 
     observed.assert_emitted_in_lx(expected_plans=1)
-    assert_lx_only_relayout_payload(dirs)
     (plan,) = observed.plans
     assert plan.num_cores == expect["source_cores"], "the plan keeps the source's"
     assert plan.destination_view.num_cores == expect["destination_cores"]
@@ -480,6 +475,48 @@ def test_relayout_into_a_matmul_x_operand(monkeypatch):
     ref = torch.neg(ht.float()) @ hw.float()
     # fp16 K=512 accumulation on device vs fp32 reference.
     torch.testing.assert_close(out.cpu().float(), ref, rtol=2e-2, atol=2e-1)
+
+
+def test_permutation_past_split_8_fires(monkeypatch):
+    """The row-split normalization geometry on a hinted pointwise pair: neg
+    hinted {R: 32} (16 whole rows per core, as a row reduction needs) feeds
+    relu hinted {R: 4, H: 8}. Logical [512, 4096] fp16 lays out as
+    [64 sticks, 512 rows, 64], so the pair's governing split is 32 (a run of
+    16 * 64 elements); both views are complete partitions of the 32 cores, so
+    the move is a permutation, and each destination gathers its 128 rows from
+    8 sources, inside the shuffle budget. The relayout law is measured for
+    permutations up to split 32, so the solver is offered the pair at the law's
+    price and fires it on economics alone (a shuffle of a few microseconds
+    against a 4 MB HBM write and re-read). Read-only spies."""
+    import torch_spyre._inductor.wsr.propagate_named_dims as _pnd
+    from torch_spyre._inductor import spyre_hint
+    from torch_spyre._inductor.dump_cost_model import governing_run_split
+
+    observed = _Observed(monkeypatch, force=False)
+    recorded = observed.plans
+
+    def fn(t):
+        with spyre_hint(work_div={"R": 32}):
+            hidden = torch.neg(t)
+        with spyre_hint(work_div={"R": 4, "H": 8}):
+            return torch.relu(hidden)
+
+    torch.manual_seed(0)
+    host = torch.randn(512, 4096, dtype=torch.float16)
+    for name, size in (("R", 512), ("H", 4096)):
+        _pnd.declare_tensor_dim(name, size)
+    x = _pnd.name_tensor_dims(host.to("spyre"), ["R", "H"])
+    with config.patch(_COOPT):
+        out = torch.compile(fn, dynamic=False)(x)
+
+    observed.assert_emitted_in_lx(expected_plans=1)
+    (plan,) = recorded
+    assert plan.num_cores == 32
+    assert governing_run_split(
+        plan.source_view, plan.destination_view, [64, 512, 64]
+    ) == (1024, 32)
+    ref = torch.relu(torch.neg(host.float())).to(torch.float16)
+    torch.testing.assert_close(out.cpu(), ref, rtol=1e-3, atol=1e-3)
 
 
 def test_two_relayout_edges_into_one_consumer(monkeypatch):
@@ -596,43 +633,78 @@ def test_relayout_on_other_dtypes(monkeypatch, dtype):
     )
 
 
-@pytest.mark.skip(
-    reason="co-opt+cpsat crashes on any coarse-tiled graph before relayout "
-    "is even considered (symbolic relationals in coarse_underfill_eff and "
-    "the LX-spill derate reached by tiled ops; #3810 review finding). "
-    "Unskip when the substrate handles symbolic coarse-tile features; the "
-    "gate itself is covered by unit tests in "
-    "test_solver_relayout_candidates.py."
-)
-def test_coarse_tiled_edges_are_never_offered(monkeypatch):
-    """A coarse-tiled graph must enumerate NO relayout candidates.
+def test_cross_group_coarse_tiled_edges_are_never_offered(monkeypatch):
+    """Relayouts must stay within one coarse-tile scope.
 
-    Both ops sit in one coarse-tile hint scope, so the producer's buffer is
-    per-tile scratch and the edge lives inside the loop. The fitted law has
-    no loop_trip factor and the committed-path planner forbids in-loop
-    relayouts; the solver path must decline at enumeration (loop_info gate),
-    not merely decline to fire."""
-    import torch_spyre._inductor.wsr.propagate_named_dims as _pnd
-    from torch_spyre._inductor import spyre_hint
+    The two for_each_tile bodies tile different axes to retain distinct
+    scopes. Check every offered and materialized edge by its endpoint
+    metadata; valid edges inside either body may still offer relayouts.
+    The candidate unit test also probes real sibling and nested group IDs
+    to prove that the scope gate rejects them before layout inspection.
+    """
+    from torch_spyre._inductor.loop_info import CoarseTileInfo
+    from torch_spyre._inductor.wsr.for_each_tile import for_each_tile
 
-    tables = []
+    groups_seen = set()
+
+    def assert_same_scope(producer, consumer):
+        prod_info = getattr(producer, "loop_info", None)
+        cons_info = getattr(consumer, "loop_info", None)
+        if prod_info is None and cons_info is None:
+            return
+        assert isinstance(prod_info, CoarseTileInfo)
+        assert isinstance(cons_info, CoarseTileInfo)
+        assert prod_info.loop_group_id == cons_info.loop_group_id, (
+            f"cross-group relayout: {producer.get_name()} "
+            f"{prod_info.loop_group_id} -> {consumer.get_name()} "
+            f"{cons_info.loop_group_id}"
+        )
+
     orig_tables = alloc_mod.CoOptimizingAllocator._cd_parent_relayouts
 
-    def spy_tables(self, *args, **kwargs):
-        out = orig_tables(self, *args, **kwargs)
-        if out:
-            tables.append(out)
+    def spy_tables(
+        self,
+        graph,
+        consumer_op,
+        consumer_divs,
+        parent_names,
+        divisions,
+        op_by_name,
+        *args,
+        **kwargs,
+    ):
+        out = orig_tables(
+            self,
+            graph,
+            consumer_op,
+            consumer_divs,
+            parent_names,
+            divisions,
+            op_by_name,
+            *args,
+            **kwargs,
+        )
+        for op in [consumer_op, *(op_by_name.get(name) for name in parent_names)]:
+            info = getattr(op, "loop_info", None)
+            if isinstance(info, CoarseTileInfo):
+                groups_seen.add(info.loop_group_id)
+        for parent, candidates in out.items():
+            if candidates:
+                assert_same_scope(op_by_name[parent], consumer_op)
         return out
 
     monkeypatch.setattr(
         alloc_mod.CoOptimizingAllocator, "_cd_parent_relayouts", spy_tables
     )
 
-    recorded = []
     real_materialize = alloc_mod.materialize_lx_relayouts
 
     def spy_mat(graph, plans):
-        recorded.extend(plans)
+        for plan in plans:
+            for name in plan.consumer_names:
+                assert_same_scope(
+                    graph.get_buffer(plan.source_name), graph.get_buffer(name)
+                )
         return real_materialize(graph, plans)
 
     monkeypatch.setattr(alloc_mod, "materialize_lx_relayouts", spy_mat)
@@ -641,28 +713,129 @@ def test_coarse_tiled_edges_are_never_offered(monkeypatch):
     torch._dynamo.reset()
 
     def fn(t, u):
-        with spyre_hint(num_tiles_per_dim={"A": 4}):
-            with spyre_hint(expected_named_dims=["A", "B"]):
-                z = torch.abs(t) + u
-                return z * 2
+        def abs_body(_, ops):
+            (t_tile,) = ops
+            return None, torch.abs(t_tile)
+
+        def add_body(_, ops):
+            v_tile, u_tile = ops
+            return None, (v_tile + u_tile) * 2
+
+        _, v = for_each_tile(abs_body, (t,), dims=(0,), tile_size=128, out_dim=0)
+        return for_each_tile(add_body, (v, u), dims=(1, 1), tile_size=64, out_dim=1)[1]
 
     torch.manual_seed(0)
     ha = torch.randn(512, 256, dtype=torch.float16)
     hb = torch.randn(512, 256, dtype=torch.float16)
-    for name, size in (("A", 512), ("B", 256)):
-        _pnd.declare_tensor_dim(name, size)
-    a = _pnd.name_tensor_dims(ha.to("spyre"), ["A", "B"])
-    b = _pnd.name_tensor_dims(hb.to("spyre"), ["A", "B"])
+    a = ha.to("spyre")
+    b = hb.to("spyre")
     with config.patch(
         {
             "co_optimizing_lx_planning": True,
             "layout_solver": "cpsat",
         }
     ):
-        out = torch.compile(fn, dynamic=False)(a, b)
+        out = torch.compile(fn, dynamic=False, fullgraph=True)(a, b)
 
-    assert tables == [], f"coarse-tiled edges were offered relayout: {tables}"
-    assert recorded == []
+    assert len(groups_seen) >= 2, "fixture did not retain distinct coarse-tile scopes"
+    ref = ((torch.abs(ha.float()) + hb.float()) * 2).to(torch.float16)
+    torch.testing.assert_close(out.cpu(), ref, rtol=2**-8, atol=2**-6)
+
+
+def test_same_group_coarse_tiled_edge_is_offered_and_priced_per_trip(monkeypatch):
+    """A coarse-tiled edge within a SINGLE for_each_tile body may be offered a
+    relayout candidate (the same-group exception in
+    ``solver_relayout_edge_context``, torch-spyre#5057), when
+    ``lx_same_tile_group_relayout`` is enabled, and that candidate's
+    cost must carry the loop's own trip-count multiplier
+    (``_coarse_tile_loop_trip_count``, see TestCoarseTileLoopTripCount in
+    test_scratchpad_solver.py) -- a relayout taken once but paid on every
+    tile iteration is not priced the same as one taken once, and the fitted
+    law has no loop_trip factor of its own to account for that.
+
+    Before #5057, this exact graph was asserted to offer NO candidates
+    (test_coarse_tiled_edges_are_never_offered). #5367 unskipped that test on
+    main after confirming the #3810 crash it cited was gone, and the
+    invariant genuinely held on main as it stood then; #5057 is what
+    deliberately narrows it to the cross-group case covered by
+    test_cross_group_coarse_tiled_edges_are_never_offered above."""
+    from torch_spyre._inductor.wsr.for_each_tile import for_each_tile
+
+    tile_size = 128
+
+    def fn(t, u):
+        def body(_, ops):
+            t_tile, u_tile = ops
+            return None, (torch.abs(t_tile) + u_tile) * 2
+
+        return for_each_tile(body, (t, u), dims=(0, 0), tile_size=tile_size, out_dim=0)[
+            1
+        ]
+
+    torch.manual_seed(0)
+    ha = torch.randn(512, 256, dtype=torch.float16)
+    hb = torch.randn(512, 256, dtype=torch.float16)
+    loop_trip_count = ha.shape[0] // tile_size
+
+    def run_and_collect_candidates():
+        tables = []
+        orig_tables = alloc_mod.CoOptimizingAllocator._cd_parent_relayouts
+
+        def spy_tables(self, *args, **kwargs):
+            out = orig_tables(self, *args, **kwargs)
+            if out:
+                tables.append(out)
+            return out
+
+        with monkeypatch.context() as m:
+            m.setattr(
+                alloc_mod.CoOptimizingAllocator, "_cd_parent_relayouts", spy_tables
+            )
+            torch._inductor.codecache.FxGraphCache.clear()
+            torch._dynamo.reset()
+            a = ha.to("spyre")
+            b = hb.to("spyre")
+            with config.patch(
+                {
+                    "co_optimizing_lx_planning": True,
+                    "layout_solver": "cpsat",
+                    "lx_same_tile_group_relayout": True,
+                }
+            ):
+                out = torch.compile(fn, dynamic=False, fullgraph=True)(a, b)
+        candidates = [c for table in tables for cs in table.values() for c in cs]
+        return out, candidates
+
+    def _key(c):
+        return (c.parent, c.consumer, c.source_division, c.consumer_division, c.group)
+
+    out, scaled_candidates = run_and_collect_candidates()
+    assert scaled_candidates, "same-group coarse-tiled edge was not offered relayout"
+    scaled_by_key = {_key(c): c.cost_ns for c in scaled_candidates}
+    assert len(scaled_by_key) == len(scaled_candidates), (
+        "candidate key collided -- some candidates were dropped from the comparison"
+    )
+
+    with monkeypatch.context() as m:
+        m.setattr(alloc_mod, "_coarse_tile_loop_trip_count", lambda op: 1)
+        _, unscaled_candidates = run_and_collect_candidates()
+    assert unscaled_candidates, "forcing trip count to 1 should not remove candidates"
+    unscaled_by_key = {_key(c): c.cost_ns for c in unscaled_candidates}
+    assert len(unscaled_by_key) == len(unscaled_candidates), (
+        "candidate key collided -- some candidates were dropped from the comparison"
+    )
+
+    assert scaled_by_key.keys() == unscaled_by_key.keys()
+    for key, scaled_cost in scaled_by_key.items():
+        unscaled_cost = unscaled_by_key[key]
+        # pair_cost itself carries no trip-count factor (that is the whole point
+        # of multiplying it in locally), so both runs share the same
+        # deterministic base and the scaling must be exact, not approximate.
+        assert scaled_cost == unscaled_cost * loop_trip_count, (
+            f"candidate {key} cost {scaled_cost} is not the per-trip cost "
+            f"{unscaled_cost} scaled by the loop trip count ({loop_trip_count})"
+        )
+
     ref = ((torch.abs(ha.float()) + hb.float()) * 2).to(torch.float16)
     torch.testing.assert_close(out.cpu(), ref, rtol=2**-8, atol=2**-6)
 
@@ -725,3 +898,86 @@ def test_sa_cooptimizer_keeps_its_objective_and_decides_no_relayout(monkeypatch)
         )
     ref = torch.relu(torch.neg(host.float())).to(torch.float16)
     torch.testing.assert_close(out.cpu(), ref, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize(
+    "rows,width,dtype,batched,strided",
+    [
+        (512, 4096, torch.float16, False, False),
+        (64, 512, torch.float16, False, False),
+        (128, 1024, torch.float16, False, False),
+        (512, 4096, torch.float16, True, False),
+        (64, 512, torch.float32, False, True),
+    ],
+)
+def test_complete_partition_expansion_fires_and_preserves_values(
+    monkeypatch, rows, width, dtype, batched, strided
+):
+    """A real 16-to-32-core transfer with four-source destination gathers."""
+    import torch_spyre._inductor.wsr.propagate_named_dims as _pnd
+    from torch_spyre._inductor import spyre_hint
+    from torch_spyre._inductor.scratchpad.lx_relayout import _core_slices
+
+    observed = _Observed(monkeypatch, force=False)
+
+    def fn(t):
+        with spyre_hint(work_div={"R": 16}):
+            hidden = torch.neg(t)
+        with spyre_hint(work_div={"R": 4, "H": 8}):
+            return torch.relu(hidden)
+
+    # Give all 128 source/feature fragments distinct value ranges.
+    # Keep inputs negative so relu(-t) observes every destination.
+    storage_width = width * (2 if strided else 1)
+    row_ids = torch.arange(rows).reshape(-1, 1)
+    column_ids = torch.arange(storage_width).reshape(1, -1) // (2 if strided else 1)
+    fragment = (row_ids // (rows // 16)) * 8 + column_ids // (width // 8)
+    offset = (row_ids * 37 + column_ids * 17) % 8
+    host = -(fragment * 8 + offset + 1).to(dtype)
+    if strided:
+        host = host[:, ::2]
+        assert not host.is_contiguous()
+    names = ["R", "H"]
+    if batched:
+        host = host.unsqueeze(0)
+        names = ["B", *names]
+        _pnd.declare_tensor_dim("B", 1)
+    for name, size in (("R", rows), ("H", width)):
+        _pnd.declare_tensor_dim(name, size)
+    x = _pnd.name_tensor_dims(host.to("spyre"), names)
+    with config.patch({**_COOPT, "sencores": 32}):
+        out = torch.compile(fn, dynamic=False)(x)
+
+    observed.assert_emitted_in_lx(expected_plans=1)
+    (plan,) = observed.plans
+    assert plan.num_cores == 16 and plan.destination_view.num_cores == 32
+    # Physical dimension order may change when a singleton batch is present.
+    # Locate row and outer-stick axes from the committed tensor's strides,
+    # independently of the per-core views being checked.
+    dims, strides, logical_strides = observed.source_layouts[plan.edge]
+    row_axes = [
+        i
+        for i, (size, stride) in enumerate(zip(dims, strides))
+        if size == rows and stride == logical_strides[-2]
+    ]
+    column_axes = [
+        i
+        for i, (size, stride) in enumerate(zip(dims[:-1], strides[:-1]))
+        if size == width // dims[-1] and stride == logical_strides[-1] * dims[-1]
+    ]
+    assert len(row_axes) == len(column_axes) == 1
+    row_axis, column_axis = row_axes[0], column_axes[0]
+    assert row_axis != column_axis
+    assert _core_slices(plan.source_view, 16) == {c: {row_axis: c} for c in range(16)}
+    assert _core_slices(plan.destination_view, 32) == {
+        c: {column_axis: c // 4, row_axis: c % 4} for c in range(32)
+    }
+    # Striding doubles host backing storage, not this logical device tensor's LX span.
+    assert plan.source_footprint_bytes == rows * width * host.element_size() // 16
+    assert plan.destination_footprint_bytes == rows * width * host.element_size() // 32
+    assert (
+        plan.source_address + plan.source_footprint_bytes <= plan.destination_address
+        or plan.destination_address + plan.destination_footprint_bytes
+        <= plan.source_address
+    ), "live source and destination LX spans overlap"
+    assert torch.equal(out.cpu(), torch.relu(-host))
