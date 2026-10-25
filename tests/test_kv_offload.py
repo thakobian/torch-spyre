@@ -21,8 +21,13 @@ from torch.testing._internal.common_utils import (
 )
 
 from torch_spyre._C import (  # type: ignore[attr-defined]
-    SharedHostPool,
+    PoolConfig,
+    PoolStatus,
     SpyreTensorLayout,
+    attach_pool,
+    create_pool,
+    destroy_pool,
+    detach_pool,
     copy_kv_page_raw,
     get_composite_address,
     get_device_dtype,
@@ -66,11 +71,28 @@ def make_cache(kv_cache_shape, fill_random):
 
 
 class TestSpyre(TestCase):
+    def setUp(self):
+        super().setUp()
+        self._num_pools = 0
+
     def _pool(self, cache, num_blocks):
+        """Create and attach a one-slot pool sized for one page of cache."""
         page_bytes = get_composite_address(cache).total_size // num_blocks
-        return SharedHostPool.create_or_attach(
-            self.id(), num_slots=1, slot_bytes=page_bytes
-        )
+        # A test may build more than one pool, so give each its own name
+        name = f"{self.id()}.{self._num_pools}"
+        self._num_pools += 1
+
+        config = PoolConfig(name, num_slots=1, slot_bytes=page_bytes)
+        status, descriptor = create_pool(config)
+        self.assertEqual(status, PoolStatus.Ok)
+        # Pools outlive every attachment until destroyed. Cleanups run
+        # last-in first-out, so the detach below runs before this destroy.
+        self.addCleanup(destroy_pool, descriptor)
+
+        status, pool = attach_pool(descriptor)
+        self.assertEqual(status, PoolStatus.Ok)
+        self.addCleanup(detach_pool, pool)
+        return pool
 
     def _kv_page_round_trip(self, kv_cache_shape, block_id=1):
         """Offload one page to the host pool and reload it into a zeroed cache.

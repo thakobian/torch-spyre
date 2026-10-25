@@ -22,7 +22,6 @@
 #include <cstdint>
 #include <flex/memory_interface/shared_host_pool.hpp>
 #include <memory>
-#include <optional>
 #include <vector>
 
 #include "job_plan.h"

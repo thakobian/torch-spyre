@@ -20,8 +20,14 @@ import torch.distributed as dist
 from torch.testing._internal.common_utils import TestCase, run_tests
 
 from torch_spyre._C import (  # type: ignore[attr-defined]
-    SharedHostPool,
+    PoolConfig,
+    PoolStatus,
     SpyreTensorLayout,
+    attach_pool,
+    create_pool,
+    destroy_pool,
+    detach_pool,
+    open_pool,
     copy_kv_page_raw,
     get_composite_address,
     get_device_dtype,
@@ -119,39 +125,48 @@ class TestKVOffloadCrossProcess(TestCase):
         if dist.is_initialized():
             dist.destroy_process_group()
 
-    def _pool(self, cache, num_blocks):
-        page_bytes = get_composite_address(cache).total_size // num_blocks
-        return SharedHostPool.create_or_attach(
-            self.id(), num_slots=1, slot_bytes=page_bytes
-        )
-
     def test_cross_process_reload(self):
         """
         Test that a KV page offloaded in one process can be reloaded in another.
         """
         kv_cache_shape = (NUM_BLOCKS, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM)
         cache = make_cache(kv_cache_shape, fill_data=True)
+        name = self.id()
 
         if self.comm_rank == 0:
-            # Process 0: Offload one page to the shared host pool
-            pool = self._pool(cache, NUM_BLOCKS)
+            # Process 0: create the pool as the delegator would, offload one
+            # page into slot 0, then detach. The pool keeps the page.
+            page_bytes = get_composite_address(cache).total_size // NUM_BLOCKS
+            config = PoolConfig(name, num_slots=1, slot_bytes=page_bytes)
+            status, descriptor = create_pool(config)
+            self.assertEqual(status, PoolStatus.Ok)
+            status, pool = attach_pool(descriptor)
+            self.assertEqual(status, PoolStatus.Ok)
             copy_kv_page_raw(cache, BLOCK_ID, pool, 0, to_device=False)
+            detach_pool(pool)
 
         dist.barrier()  # Ensure process 0 has completed offloading
 
-        # Process 1: Reload the page from the shared host pool
+        # Process 1: open the pool by name and reload the page from it
         if self.comm_rank == 1:
-            pool = self._pool(cache, NUM_BLOCKS)
+            status, descriptor = open_pool(name)
+            self.assertEqual(status, PoolStatus.Ok)
+            status, pool = attach_pool(descriptor)
+            self.assertEqual(status, PoolStatus.Ok)
             reloaded_cache = make_cache(kv_cache_shape, fill_data=False)
             copy_kv_page_raw(reloaded_cache, BLOCK_ID, pool, 0, to_device=True)
+            detach_pool(pool)
 
             # Verify that the reloaded page matches the expected one
             self.assertEqual(
                 reloaded_cache.to("cpu")[BLOCK_ID], cache.to("cpu")[BLOCK_ID]
             )
 
-        # Ensure process 0 doesn't exit so pool is not destroyed before process 1 is done with it
-        dist.barrier()
+        dist.barrier()  # Ensure process 1 has detached
+
+        if self.comm_rank == 0:
+            # Nobody is attached anymore, so the pool can be destroyed.
+            self.assertEqual(destroy_pool(descriptor), PoolStatus.Ok)
 
 
 if __name__ == "__main__":
