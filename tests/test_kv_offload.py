@@ -112,7 +112,13 @@ class TestSpyre(TestCase):
         expected_cache = torch.zeros(kv_cache_shape, dtype=torch.float16)
         expected_cache[block_id] = source_cache.to("cpu")[block_id]
 
-        self.assertEqual(dest_cache.to("cpu"), expected_cache)
+        # Compare raw bytes with zero tolerance: the copy must be bit for bit
+        self.assertEqual(
+            dest_cache.to("cpu").contiguous().view(torch.uint8),
+            expected_cache.contiguous().view(torch.uint8),
+            rtol=0,
+            atol=0,
+        )
 
     def test_small_page(self):
         """One page of 16 tokens, 32 KiB."""

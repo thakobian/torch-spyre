@@ -157,9 +157,12 @@ class TestKVOffloadCrossProcess(TestCase):
             copy_kv_page_raw(reloaded_cache, BLOCK_ID, pool, 0, to_device=True)
             detach_pool(pool)
 
-            # Verify that the reloaded page matches the expected one
+            # Verify the reloaded page matches byte for byte, with zero tolerance
             self.assertEqual(
-                reloaded_cache.to("cpu")[BLOCK_ID], cache.to("cpu")[BLOCK_ID]
+                reloaded_cache.to("cpu")[BLOCK_ID].contiguous().view(torch.uint8),
+                cache.to("cpu")[BLOCK_ID].contiguous().view(torch.uint8),
+                rtol=0,
+                atol=0,
             )
 
         dist.barrier()  # Ensure process 1 has detached

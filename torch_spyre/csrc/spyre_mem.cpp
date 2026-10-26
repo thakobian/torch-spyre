@@ -1081,10 +1081,12 @@ void copy_kv_page_raw(const at::Tensor& cache, size_t block_id,
 
   const flex::Range range = derive_kv_page_range(cache, block_id);
 
-  auto* params = flex::createCopyRawParams(&pool, slot_id, composite_address,
-                                           to_device, range);
-  stream.launchCopyRaw(params);
-  flex::destroyCopyRawParams(params);
+  // Owns params so they are destroyed even if launchCopyRaw() throws.
+  std::unique_ptr<flex::CopyRawParams, decltype(&flex::destroyCopyRawParams)>
+      params(flex::createCopyRawParams(&pool, slot_id, composite_address,
+                                       to_device, range),
+             &flex::destroyCopyRawParams);
+  stream.launchCopyRaw(params.get());
 
   if (!non_blocking) {
     stream.synchronize();
