@@ -402,9 +402,8 @@ PYBIND11_MODULE(_C, m) {
       },
       py::arg("descriptor"));
   // Takes the pool's unique_ptr out of the Python object (see SharedPool
-  // above); any later use of that object raises.
-  // Detaching an already detached pool does nothing, like closing a closed
-  // file.
+  // above); any later use of that object raises. Detaching an already
+  // detached pool does nothing, like closing a closed file.
   m.def(
       "detach_pool",
       [](const py::object& pool) {

@@ -13,6 +13,9 @@
 # limitations under the License.
 
 
+import gc
+from multiprocessing import shared_memory
+
 from torch.testing._internal.common_utils import (
     TestCase,
     run_tests,
@@ -185,6 +188,103 @@ class TestSharedHostPool(TestCase):
         # detach_pool() took the pool out of the handle, so it can't be used
         with self.assertRaises(ValueError):
             pool.slot_count()
+
+    def test_compatibility_round_trip(self):
+        # Opaque bytes, including ones that are not valid text
+        tag = b"granite-8b;fp16;block_size=16;\x00\xff"
+        config = PoolConfig(self.id(), 5, 5, compatibility=tag)
+        status, descriptor = create_pool(config)
+        self.assertEqual(status, PoolStatus.Ok)
+        self.addCleanup(destroy_pool, descriptor)
+
+        # The tag comes back unchanged from create and from open
+        self.assertEqual(descriptor.config.compatibility, tag)
+        status, opened = open_pool(self.id())
+        self.assertEqual(status, PoolStatus.Ok)
+        self.assertEqual(opened.config.compatibility, tag)
+
+        # A descriptor carrying the tag attaches
+        self._attach(descriptor)
+
+    def test_invalid_config_rejected(self):
+        name = self.id()
+        bad_configs = {
+            "empty name": PoolConfig("", 5, 5),
+            "slash in name": PoolConfig(f"{name}/x", 5, 5),
+            "temp file name": PoolConfig(f"{name}.tmp.1", 5, 5),
+            "data file name": PoolConfig(f"{name}.data.1", 5, 5),
+            "lock file name": PoolConfig(f"{name}.lock", 5, 5),
+            "zero slots": PoolConfig(name, 0, 5),
+            "zero slot bytes": PoolConfig(name, 5, 0),
+        }
+        # Caller bugs raise instead of returning a status
+        for case, config in bad_configs.items():
+            with self.subTest(case), self.assertRaises(ValueError):
+                create_pool(config)
+
+        # Every entry point checks the name, not just create
+        with self.assertRaises(ValueError):
+            open_pool(f"{name}.lock")
+
+    def test_negative_sizes_rejected(self):
+        # pybind can't convert a negative size to size_t
+        with self.assertRaises(TypeError):
+            PoolConfig(self.id(), -1, 5)
+        with self.assertRaises(TypeError):
+            PoolConfig(self.id(), 5, -1)
+
+    def test_attach_after_destroy(self):
+        descriptor = self._create()
+        self.assertEqual(destroy_pool(descriptor), PoolStatus.Ok)
+
+        # A worker attaching after the pool is gone gets NotFound, not a pool
+        status, pool = attach_pool(descriptor)
+        self.assertEqual(status, PoolStatus.NotFound)
+        self.assertIsNone(pool)
+
+    def test_non_pool_file_at_name(self):
+        descriptor = self._create()
+        self.assertEqual(destroy_pool(descriptor), PoolStatus.Ok)
+
+        # Put a zero-filled shared memory file, not a pool, at the pool's name
+        shm = shared_memory.SharedMemory(name=self.id(), create=True, size=4096)
+        self.addCleanup(shm.unlink)
+        self.addCleanup(shm.close)
+
+        status, _ = open_pool(self.id())
+        self.assertEqual(status, PoolStatus.ResourceError)
+        status, pool = attach_pool(descriptor)
+        self.assertEqual(status, PoolStatus.ResourceError)
+        self.assertIsNone(pool)
+
+    def test_detach_twice_is_noop(self):
+        descriptor = self._create()
+        pool = self._attach(descriptor)
+
+        # The second detach (and _attach()'s cleanup) must not raise; an
+        # exception here fails the test
+        detach_pool(pool)
+        detach_pool(pool)
+
+        # The pool really is detached: nothing blocks destroy anymore
+        self.assertEqual(destroy_pool(descriptor), PoolStatus.Ok)
+
+    def test_garbage_collection_detaches(self):
+        descriptor = self._create()
+        status, pool = attach_pool(descriptor)
+        self.assertEqual(status, PoolStatus.Ok)
+
+        # Freeing an attached pool's handle detaches it, so destroy succeeds
+        del pool
+        gc.collect()
+        self.assertEqual(destroy_pool(descriptor), PoolStatus.Ok)
+
+    def test_destroy_twice(self):
+        descriptor = self._create()
+        self.assertEqual(destroy_pool(descriptor), PoolStatus.Ok)
+
+        # A second destroy reports the pool is gone instead of raising
+        self.assertEqual(destroy_pool(descriptor), PoolStatus.NotFound)
 
 
 if __name__ == "__main__":
