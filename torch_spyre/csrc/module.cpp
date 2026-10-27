@@ -403,7 +403,19 @@ PYBIND11_MODULE(_C, m) {
       py::arg("descriptor"));
   // Takes the pool's unique_ptr out of the Python object (see SharedPool
   // above); any later use of that object raises.
-  m.def("detach_pool", &flex::DetachPool, py::arg("pool"));
+  // Detaching an already detached pool does nothing, like closing a closed
+  // file.
+  m.def(
+      "detach_pool",
+      [](const py::object& pool) {
+        try {
+          flex::DetachPool(py::cast<std::unique_ptr<flex::SharedPool>>(pool));
+        }
+        catch (const py::value_error&) {
+          // smart_holder reports an already detached handle as value_error.
+        }
+      },
+      py::arg("pool"));
 
   dci_cls.def_readonly("device_size", &spyre::SpyreTensorLayout::device_size)
       .def_readonly("stride_map", &spyre::SpyreTensorLayout::stride_map)
