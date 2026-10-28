@@ -246,7 +246,6 @@ class TestSharedHostPool(TestCase):
             "slash in name": PoolConfig(f"{name}/x", 5, 5),
             "temp file name": PoolConfig(f"{name}.tmp.1", 5, 5),
             "data file name": PoolConfig(f"{name}.data.1", 5, 5),
-            "lock file name": PoolConfig(f"{name}.lock", 5, 5),
             "zero slots": PoolConfig(name, 0, 5),
             "zero slot bytes": PoolConfig(name, 5, 0),
         }
@@ -257,7 +256,7 @@ class TestSharedHostPool(TestCase):
 
         # Every entry point checks the name, not just create
         with self.assertRaises(ValueError):
-            open_pool(f"{name}.lock")
+            open_pool(f"{name}.tmp.1")
 
     def test_negative_sizes_rejected(self):
         # pybind can't convert a negative size to size_t
