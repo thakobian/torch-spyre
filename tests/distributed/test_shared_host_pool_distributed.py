@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import os
+import uuid
 
 import pytest
 import torch
@@ -82,6 +84,46 @@ class TestSharedHostPoolCrossProcess(TestCase):
         if dist.is_initialized():
             dist.destroy_process_group()
 
+    def setUp(self):
+        super().setUp()
+        # Pools outlive the processes that made them, so a fixed name would
+        # collide with a pool a killed run left behind. Rank 0 picks a per-run
+        # name and broadcasts it so every rank uses the same one.
+        names = [f"{self.id()}.{uuid.uuid4().hex}" if self.comm_rank == 0 else None]
+        dist.broadcast_object_list(names, src=0, device=torch.device("cpu"))
+        self.pool_name = names[0]
+
+    @contextlib.contextmanager
+    def _step(self):
+        """
+        Run one step of a test on this rank, then sync with the other ranks.
+        If any rank's step fails, every rank raises here, instead of the other
+        ranks waiting forever at a later barrier.
+        """
+        error = None
+        try:
+            yield
+        except Exception as e:
+            error = e
+        failed = torch.tensor([0 if error is None else 1])
+        dist.all_reduce(failed)
+        if error is not None:
+            raise error
+        if failed.item():
+            raise RuntimeError("Another rank failed this step")
+
+    def _cleanup(self, descriptor, pool):
+        """
+        Detach and destroy, also after a failed step. All ranks get here
+        together, since _step() makes them fail at the same step.
+        """
+        if pool is not None:
+            detach_pool(pool)
+        dist.barrier()  # Ensure every rank has detached
+        if self.comm_rank == 0 and descriptor is not None:
+            status = destroy_pool(descriptor)
+            self.assertIn(status, (PoolStatus.Ok, PoolStatus.NotFound))
+
     def test_cross_process_shared_pool(self):
         """
         A pool created by one process (the delegator) can be opened by name and
@@ -89,106 +131,100 @@ class TestSharedHostPoolCrossProcess(TestCase):
         """
         num_slots = 1
         slot_bytes = 10
-        name = self.id()
+        descriptor = pool = None
+        try:
+            with self._step():
+                if self.comm_rank == 0:
+                    # Process 0 acts as the delegator: create, never attach
+                    config = PoolConfig(self.pool_name, num_slots, slot_bytes)
+                    status, descriptor = create_pool(config)
+                    self.assertEqual(status, PoolStatus.Ok)
 
-        if self.comm_rank == 0:
-            # Process 0 acts as the delegator: create the pool, never attach.
-            config = PoolConfig(name, num_slots, slot_bytes)
-            status, descriptor = create_pool(config)
-            self.assertEqual(status, PoolStatus.Ok)
-
-        dist.barrier()  # Ensure process 0 has created the pool
-
-        if self.comm_rank == 1:
-            # Process 1 only knows the name: open the pool, then attach it.
-            status, descriptor = open_pool(name)
-            self.assertEqual(status, PoolStatus.Ok)
-            status, pool = attach_pool(descriptor)
-            self.assertEqual(status, PoolStatus.Ok)
-            self.assertEqual(pool.slot_count(), num_slots)
-            self.assertEqual(pool.name(), name)
-            self.assertEqual(pool.total_bytes(), pool.slot_count() * pool.slot_bytes())
-            detach_pool(pool)
-
-        dist.barrier()  # Ensure process 1 has detached
-
-        if self.comm_rank == 0:
-            # Nobody is attached anymore, so the delegator can destroy the pool.
-            self.assertEqual(destroy_pool(descriptor), PoolStatus.Ok)
+            with self._step():
+                if self.comm_rank == 1:
+                    # Process 1 only knows the name: open the pool, then attach
+                    status, opened = open_pool(self.pool_name)
+                    self.assertEqual(status, PoolStatus.Ok)
+                    status, pool = attach_pool(opened)
+                    self.assertEqual(status, PoolStatus.Ok)
+                    self.assertEqual(pool.slot_count(), num_slots)
+                    self.assertEqual(pool.name(), self.pool_name)
+                    self.assertEqual(
+                        pool.total_bytes(), pool.slot_count() * pool.slot_bytes()
+                    )
+        finally:
+            # Process 1 detaches, then the delegator destroys the pool
+            self._cleanup(descriptor, pool)
 
     def test_cross_process_destroy_blocked_while_attached(self):
         """
         An attachment in one process blocks destroy in another until it
         detaches.
         """
-        name = self.id()
+        descriptor = pool = None
+        try:
+            with self._step():
+                if self.comm_rank == 0:
+                    config = PoolConfig(self.pool_name, 1, 10)
+                    status, descriptor = create_pool(config)
+                    self.assertEqual(status, PoolStatus.Ok)
 
-        if self.comm_rank == 0:
-            status, descriptor = create_pool(PoolConfig(name, 1, 10))
-            self.assertEqual(status, PoolStatus.Ok)
+            with self._step():
+                if self.comm_rank == 1:
+                    status, opened = open_pool(self.pool_name)
+                    self.assertEqual(status, PoolStatus.Ok)
+                    status, pool = attach_pool(opened)
+                    self.assertEqual(status, PoolStatus.Ok)
 
-        dist.barrier()  # Ensure process 0 has created the pool
+            with self._step():
+                if self.comm_rank == 0:
+                    # Process 1's attachment blocks destroy
+                    self.assertEqual(destroy_pool(descriptor), PoolStatus.PoolBusy)
 
-        if self.comm_rank == 1:
-            status, descriptor = open_pool(name)
-            self.assertEqual(status, PoolStatus.Ok)
-            status, pool = attach_pool(descriptor)
-            self.assertEqual(status, PoolStatus.Ok)
+            with self._step():
+                if self.comm_rank == 1:
+                    detach_pool(pool)
 
-        dist.barrier()  # Ensure process 1 is attached
-
-        if self.comm_rank == 0:
-            # Process 1's attachment blocks destroy
-            self.assertEqual(destroy_pool(descriptor), PoolStatus.PoolBusy)
-
-        dist.barrier()  # Ensure process 0 has tried to destroy
-
-        if self.comm_rank == 1:
-            detach_pool(pool)
-
-        dist.barrier()  # Ensure process 1 has detached
-
-        if self.comm_rank == 0:
-            self.assertEqual(destroy_pool(descriptor), PoolStatus.Ok)
+            with self._step():
+                if self.comm_rank == 0:
+                    # With process 1 detached, destroy succeeds
+                    self.assertEqual(destroy_pool(descriptor), PoolStatus.Ok)
+        finally:
+            self._cleanup(descriptor, pool)
 
     def test_cross_process_stale_descriptor(self):
         """
         A descriptor held by one process is rejected after another process
         destroys and re-creates the pool under the same name.
         """
-        name = self.id()
-        config = PoolConfig(name, 1, 10)
+        config = PoolConfig(self.pool_name, 1, 10)
+        descriptor = pool = None
+        try:
+            with self._step():
+                if self.comm_rank == 0:
+                    status, descriptor = create_pool(config)
+                    self.assertEqual(status, PoolStatus.Ok)
 
-        if self.comm_rank == 0:
-            status, descriptor = create_pool(config)
-            self.assertEqual(status, PoolStatus.Ok)
+            with self._step():
+                if self.comm_rank == 1:
+                    # Process 1 holds a descriptor but doesn't attach yet
+                    status, old = open_pool(self.pool_name)
+                    self.assertEqual(status, PoolStatus.Ok)
 
-        dist.barrier()  # Ensure process 0 has created the pool
+            with self._step():
+                if self.comm_rank == 0:
+                    # Same name, new generation
+                    self.assertEqual(destroy_pool(descriptor), PoolStatus.Ok)
+                    status, descriptor = create_pool(config)
+                    self.assertEqual(status, PoolStatus.Ok)
 
-        if self.comm_rank == 1:
-            # Process 1 holds a descriptor but doesn't attach yet
-            status, old = open_pool(name)
-            self.assertEqual(status, PoolStatus.Ok)
-
-        dist.barrier()  # Ensure process 1 holds the old descriptor
-
-        if self.comm_rank == 0:
-            # Same name, new generation
-            self.assertEqual(destroy_pool(descriptor), PoolStatus.Ok)
-            status, descriptor = create_pool(config)
-            self.assertEqual(status, PoolStatus.Ok)
-
-        dist.barrier()  # Ensure process 0 has re-created the pool
-
-        if self.comm_rank == 1:
-            status, pool = attach_pool(old)
-            self.assertEqual(status, PoolStatus.StaleGeneration)
-            self.assertIsNone(pool)
-
-        dist.barrier()  # Ensure process 1 is done
-
-        if self.comm_rank == 0:
-            self.assertEqual(destroy_pool(descriptor), PoolStatus.Ok)
+            with self._step():
+                if self.comm_rank == 1:
+                    status, pool = attach_pool(old)
+                    self.assertEqual(status, PoolStatus.StaleGeneration)
+                    self.assertIsNone(pool)
+        finally:
+            self._cleanup(descriptor, pool)
 
 
 if __name__ == "__main__":

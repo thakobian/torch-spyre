@@ -14,6 +14,8 @@
 
 
 import gc
+import os
+import uuid
 from multiprocessing import shared_memory
 
 from torch.testing._internal.common_utils import (
@@ -44,12 +46,41 @@ class TestSharedHostPool(TestCase):
     Tests for the SharedHostPool functionality in the torch_spyre module.
     """
 
+    def setUp(self):
+        super().setUp()
+        # Pools outlive the process that made them, so a killed run leaves its
+        # pool behind. A per-run name keeps that leftover from colliding with
+        # this run, and recovery removes leftovers from earlier runs.
+        self.pool_name = f"{self.id()}.{uuid.uuid4().hex}"
+        self._remove_leftover_pools()
+
+    def _remove_leftover_pools(self):
+        """Destroy pools left behind by earlier, killed runs of this test."""
+        if not os.path.isdir("/dev/shm"):
+            return
+        prefix = f"{self.id()}."
+        for entry in os.listdir("/dev/shm"):
+            # A pool is "<prefix><hex>"; its .lock, .data. and .tmp. files are
+            # flex's to manage
+            if not entry.startswith(prefix) or "." in entry[len(prefix) :]:
+                continue
+            status, descriptor = open_pool(entry)
+            if status == PoolStatus.Ok:
+                # PoolBusy means a live run still uses it, so leave it alone
+                destroy_pool(descriptor)
+
+    def _destroy_checked(self, descriptor):
+        # NotFound means the test destroyed the pool itself. Anything else,
+        # such as PoolBusy, means the test leaked an attachment.
+        self.assertIn(destroy_pool(descriptor), (PoolStatus.Ok, PoolStatus.NotFound))
+
     def _create(self, num_slots=5, slot_bytes=5):
-        status, descriptor = create_pool(PoolConfig(self.id(), num_slots, slot_bytes))
+        config = PoolConfig(self.pool_name, num_slots, slot_bytes)
+        status, descriptor = create_pool(config)
         self.assertEqual(status, PoolStatus.Ok)
         # Pools outlive every attachment until destroyed. Cleanups run last-in
         # first-out, so this runs after any detach registered by _attach().
-        self.addCleanup(destroy_pool, descriptor)
+        self.addCleanup(self._destroy_checked, descriptor)
         return descriptor
 
     def _attach(self, descriptor):
@@ -89,7 +120,7 @@ class TestSharedHostPool(TestCase):
 
         # The name is taken, so a second create fails even with a different
         # geometry; it never resizes or replaces the existing pool
-        status, _ = create_pool(PoolConfig(self.id(), 10, 10))
+        status, _ = create_pool(PoolConfig(self.pool_name, 10, 10))
         self.assertEqual(status, PoolStatus.AlreadyExists)
 
     def test_no_host_pointer(self):
@@ -120,7 +151,7 @@ class TestSharedHostPool(TestCase):
         shared_pool = self._attach(self._create())
 
         # Check if name is as expected
-        self.assertEqual(shared_pool.name(), self.id())
+        self.assertEqual(shared_pool.name(), self.pool_name)
 
     def test_total_bytes(self):
         # Create and attach a shared pool
@@ -136,12 +167,12 @@ class TestSharedHostPool(TestCase):
         descriptor = self._create()
 
         # Opening by name finds the same pool, not just one with that name
-        status, opened = open_pool(self.id())
+        status, opened = open_pool(self.pool_name)
         self.assertEqual(status, PoolStatus.Ok)
         self.assertEqual(opened.generation, descriptor.generation)
 
     def test_open_missing_pool(self):
-        status, _ = open_pool(self.id())
+        status, _ = open_pool(self.pool_name)
         self.assertEqual(status, PoolStatus.NotFound)
 
     def test_destroy_while_attached(self):
@@ -161,7 +192,7 @@ class TestSharedHostPool(TestCase):
 
         # With no one attached, destroy succeeds and the pool is gone
         self.assertEqual(destroy_pool(descriptor), PoolStatus.Ok)
-        status, _ = open_pool(self.id())
+        status, _ = open_pool(self.pool_name)
         self.assertEqual(status, PoolStatus.NotFound)
 
     def test_stale_generation(self):
@@ -192,14 +223,14 @@ class TestSharedHostPool(TestCase):
     def test_compatibility_round_trip(self):
         # Opaque bytes, including ones that are not valid text
         tag = b"granite-8b;fp16;block_size=16;\x00\xff"
-        config = PoolConfig(self.id(), 5, 5, compatibility=tag)
+        config = PoolConfig(self.pool_name, 5, 5, compatibility=tag)
         status, descriptor = create_pool(config)
         self.assertEqual(status, PoolStatus.Ok)
-        self.addCleanup(destroy_pool, descriptor)
+        self.addCleanup(self._destroy_checked, descriptor)
 
         # The tag comes back unchanged from create and from open
         self.assertEqual(descriptor.config.compatibility, tag)
-        status, opened = open_pool(self.id())
+        status, opened = open_pool(self.pool_name)
         self.assertEqual(status, PoolStatus.Ok)
         self.assertEqual(opened.config.compatibility, tag)
 
@@ -207,7 +238,7 @@ class TestSharedHostPool(TestCase):
         self._attach(descriptor)
 
     def test_invalid_config_rejected(self):
-        name = self.id()
+        name = self.pool_name
         bad_configs = {
             "empty name": PoolConfig("", 5, 5),
             "slash in name": PoolConfig(f"{name}/x", 5, 5),
@@ -229,9 +260,9 @@ class TestSharedHostPool(TestCase):
     def test_negative_sizes_rejected(self):
         # pybind can't convert a negative size to size_t
         with self.assertRaises(TypeError):
-            PoolConfig(self.id(), -1, 5)
+            PoolConfig(self.pool_name, -1, 5)
         with self.assertRaises(TypeError):
-            PoolConfig(self.id(), 5, -1)
+            PoolConfig(self.pool_name, 5, -1)
 
     def test_attach_after_destroy(self):
         descriptor = self._create()
@@ -247,11 +278,11 @@ class TestSharedHostPool(TestCase):
         self.assertEqual(destroy_pool(descriptor), PoolStatus.Ok)
 
         # Put a zero-filled shared memory file, not a pool, at the pool's name
-        shm = shared_memory.SharedMemory(name=self.id(), create=True, size=4096)
+        shm = shared_memory.SharedMemory(name=self.pool_name, create=True, size=4096)
         self.addCleanup(shm.unlink)
         self.addCleanup(shm.close)
 
-        status, _ = open_pool(self.id())
+        status, _ = open_pool(self.pool_name)
         self.assertEqual(status, PoolStatus.ResourceError)
         status, pool = attach_pool(descriptor)
         self.assertEqual(status, PoolStatus.ResourceError)
