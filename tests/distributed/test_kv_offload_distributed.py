@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import os
+import uuid
 
 import pytest
 import torch
@@ -27,7 +29,6 @@ from torch_spyre._C import (  # type: ignore[attr-defined]
     create_pool,
     destroy_pool,
     detach_pool,
-    open_pool,
     copy_kv_page_raw,
     get_composite_address,
     get_device_dtype,
@@ -125,51 +126,102 @@ class TestKVOffloadCrossProcess(TestCase):
         if dist.is_initialized():
             dist.destroy_process_group()
 
+    def setUp(self):
+        super().setUp()
+        # Pools outlive the processes that made them, so a fixed name would
+        # collide with a pool a killed run left behind. Rank 0 picks a per-run
+        # name and broadcasts it so every rank uses the same one.
+        name = f"{self.id()}.{uuid.uuid4().hex}" if self.comm_rank == 0 else None
+        self.pool_name = self._broadcast(name)
+
+    def _broadcast(self, obj):
+        """Send obj from rank 0 to every rank; it is pickled on the way."""
+        objs = [obj]
+        dist.broadcast_object_list(objs, src=0, device=torch.device("cpu"))
+        return objs[0]
+
+    @contextlib.contextmanager
+    def _step(self):
+        """
+        Run one step of a test on this rank, then sync with the other ranks.
+        If any rank's step fails, every rank raises here, instead of the other
+        ranks waiting forever at a later barrier.
+        """
+        error = None
+        try:
+            yield
+        except Exception as e:
+            error = e
+        failed = torch.tensor([0 if error is None else 1])
+        dist.all_reduce(failed)
+        if error is not None:
+            raise error
+        if failed.item():
+            raise RuntimeError("Another rank failed this step")
+
+    def _cleanup(self, descriptor, pool):
+        """
+        Detach and destroy, also after a failed step. All ranks get here
+        together, since _step() makes them fail at the same step.
+        """
+        if pool is not None:
+            detach_pool(pool)
+        dist.barrier()  # Ensure every rank has detached
+        if self.comm_rank == 0 and descriptor is not None:
+            status = destroy_pool(descriptor)
+            self.assertIn(status, (PoolStatus.Ok, PoolStatus.NotFound))
+
     def test_cross_process_reload(self):
         """
         Test that a KV page offloaded in one process can be reloaded in another.
         """
         kv_cache_shape = (NUM_BLOCKS, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM)
         cache = make_cache(kv_cache_shape, fill_data=True)
-        name = self.id()
+        descriptor = pool = None
+        try:
+            with self._step():
+                if self.comm_rank == 0:
+                    # Process 0: create the pool as the delegator would,
+                    # offload one page into slot 0, then detach. The pool keeps
+                    # the page.
+                    page_bytes = get_composite_address(cache).total_size // NUM_BLOCKS
+                    config = PoolConfig(
+                        self.pool_name, num_slots=1, slot_bytes=page_bytes
+                    )
+                    status, descriptor = create_pool(config)
+                    self.assertEqual(status, PoolStatus.Ok)
+                    status, pool = attach_pool(descriptor)
+                    self.assertEqual(status, PoolStatus.Ok)
+                    copy_kv_page_raw(cache, BLOCK_ID, pool, 0, to_device=False)
+                    detach_pool(pool)
 
-        if self.comm_rank == 0:
-            # Process 0: create the pool as the delegator would, offload one
-            # page into slot 0, then detach. The pool keeps the page.
-            page_bytes = get_composite_address(cache).total_size // NUM_BLOCKS
-            config = PoolConfig(name, num_slots=1, slot_bytes=page_bytes)
-            status, descriptor = create_pool(config)
-            self.assertEqual(status, PoolStatus.Ok)
-            status, pool = attach_pool(descriptor)
-            self.assertEqual(status, PoolStatus.Ok)
-            copy_kv_page_raw(cache, BLOCK_ID, pool, 0, to_device=False)
-            detach_pool(pool)
+            # The delegator hands the descriptor to the other ranks
+            received = self._broadcast(descriptor)
 
-        dist.barrier()  # Ensure process 0 has completed offloading
+            with self._step():
+                if self.comm_rank == 1:
+                    # Process 1: attach with the descriptor it received and
+                    # reload the page from the pool
+                    status, pool = attach_pool(received)
+                    self.assertEqual(status, PoolStatus.Ok)
+                    reloaded_cache = make_cache(kv_cache_shape, fill_data=False)
+                    copy_kv_page_raw(reloaded_cache, BLOCK_ID, pool, 0, to_device=True)
+                    detach_pool(pool)
 
-        # Process 1: open the pool by name and reload the page from it
-        if self.comm_rank == 1:
-            status, descriptor = open_pool(name)
-            self.assertEqual(status, PoolStatus.Ok)
-            status, pool = attach_pool(descriptor)
-            self.assertEqual(status, PoolStatus.Ok)
-            reloaded_cache = make_cache(kv_cache_shape, fill_data=False)
-            copy_kv_page_raw(reloaded_cache, BLOCK_ID, pool, 0, to_device=True)
-            detach_pool(pool)
-
-            # Verify the reloaded page matches byte for byte, with zero tolerance
-            self.assertEqual(
-                reloaded_cache.to("cpu")[BLOCK_ID].contiguous().view(torch.uint8),
-                cache.to("cpu")[BLOCK_ID].contiguous().view(torch.uint8),
-                rtol=0,
-                atol=0,
-            )
-
-        dist.barrier()  # Ensure process 1 has detached
-
-        if self.comm_rank == 0:
-            # Nobody is attached anymore, so the pool can be destroyed.
-            self.assertEqual(destroy_pool(descriptor), PoolStatus.Ok)
+                    # Verify the reloaded page matches byte for byte, with zero
+                    # tolerance
+                    reloaded = reloaded_cache.to("cpu")[BLOCK_ID].contiguous()
+                    expected = cache.to("cpu")[BLOCK_ID].contiguous()
+                    self.assertEqual(
+                        reloaded.view(torch.uint8),
+                        expected.view(torch.uint8),
+                        rtol=0,
+                        atol=0,
+                    )
+        finally:
+            # Detach anything still attached, even after a failed step, then
+            # the delegator destroys the pool
+            self._cleanup(descriptor, pool)
 
 
 if __name__ == "__main__":
