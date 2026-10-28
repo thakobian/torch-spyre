@@ -15,6 +15,7 @@
 
 import gc
 import os
+import pickle
 import uuid
 from multiprocessing import shared_memory
 
@@ -25,6 +26,7 @@ from torch.testing._internal.common_utils import (
 
 from torch_spyre._C import (
     PoolConfig,
+    PoolDescriptor,
     PoolState,
     PoolStatus,
     attach_pool,
@@ -316,6 +318,37 @@ class TestSharedHostPool(TestCase):
 
         # A second destroy reports the pool is gone instead of raising
         self.assertEqual(destroy_pool(descriptor), PoolStatus.NotFound)
+
+    def test_descriptor_survives_pickling(self):
+        descriptor = self._create()
+        received = pickle.loads(pickle.dumps(descriptor))
+
+        # Every field survives, and the copy attaches like the original
+        self.assertEqual(received.name, descriptor.name)
+        self.assertEqual(received.generation, descriptor.generation)
+        self.assertEqual(received.state, descriptor.state)
+        self.assertEqual(received.config.num_slots, descriptor.config.num_slots)
+        self.assertEqual(received.config.slot_bytes, descriptor.config.slot_bytes)
+        self.assertEqual(received.config.compatibility, descriptor.config.compatibility)
+        self._attach(received)
+
+    def test_descriptor_pickle_version_mismatch(self):
+        state = self._create().__getstate__()
+
+        # A descriptor pickled by a build with another format is rejected
+        received = PoolDescriptor.__new__(PoolDescriptor)
+        with self.assertRaises(ValueError):
+            received.__setstate__((state[0] + 1,) + state[1:])
+
+    def test_compatibility_mismatch(self):
+        state = self._create().__getstate__()
+
+        # A descriptor whose compatibility changed in transit can't attach
+        received = PoolDescriptor.__new__(PoolDescriptor)
+        received.__setstate__(state[:-1] + (b"other-model",))
+        status, pool = attach_pool(received)
+        self.assertEqual(status, PoolStatus.ConfigurationMismatch)
+        self.assertIsNone(pool)
 
 
 if __name__ == "__main__":

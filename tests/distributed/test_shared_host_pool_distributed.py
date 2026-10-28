@@ -28,7 +28,6 @@ from torch_spyre._C import (  # type: ignore[attr-defined]
     create_pool,
     destroy_pool,
     detach_pool,
-    open_pool,
 )
 
 # Skip all tests if RANK is not defined, or WORLD_SIZE is not set or less than 2
@@ -89,9 +88,14 @@ class TestSharedHostPoolCrossProcess(TestCase):
         # Pools outlive the processes that made them, so a fixed name would
         # collide with a pool a killed run left behind. Rank 0 picks a per-run
         # name and broadcasts it so every rank uses the same one.
-        names = [f"{self.id()}.{uuid.uuid4().hex}" if self.comm_rank == 0 else None]
-        dist.broadcast_object_list(names, src=0, device=torch.device("cpu"))
-        self.pool_name = names[0]
+        name = f"{self.id()}.{uuid.uuid4().hex}" if self.comm_rank == 0 else None
+        self.pool_name = self._broadcast(name)
+
+    def _broadcast(self, obj):
+        """Send obj from rank 0 to every rank; it is pickled on the way."""
+        objs = [obj]
+        dist.broadcast_object_list(objs, src=0, device=torch.device("cpu"))
+        return objs[0]
 
     @contextlib.contextmanager
     def _step(self):
@@ -126,8 +130,8 @@ class TestSharedHostPoolCrossProcess(TestCase):
 
     def test_cross_process_shared_pool(self):
         """
-        A pool created by one process (the delegator) can be opened by name and
-        attached in another, with matching geometry.
+        A pool created by one process (the delegator) can be attached in
+        another, using the descriptor the delegator sent it.
         """
         num_slots = 1
         slot_bytes = 10
@@ -140,12 +144,13 @@ class TestSharedHostPoolCrossProcess(TestCase):
                     status, descriptor = create_pool(config)
                     self.assertEqual(status, PoolStatus.Ok)
 
+            # The delegator hands the descriptor to the workers
+            received = self._broadcast(descriptor)
+
             with self._step():
                 if self.comm_rank == 1:
-                    # Process 1 only knows the name: open the pool, then attach
-                    status, opened = open_pool(self.pool_name)
-                    self.assertEqual(status, PoolStatus.Ok)
-                    status, pool = attach_pool(opened)
+                    # Process 1 only attaches, using the descriptor it received
+                    status, pool = attach_pool(received)
                     self.assertEqual(status, PoolStatus.Ok)
                     self.assertEqual(pool.slot_count(), num_slots)
                     self.assertEqual(pool.name(), self.pool_name)
@@ -169,11 +174,11 @@ class TestSharedHostPoolCrossProcess(TestCase):
                     status, descriptor = create_pool(config)
                     self.assertEqual(status, PoolStatus.Ok)
 
+            received = self._broadcast(descriptor)
+
             with self._step():
                 if self.comm_rank == 1:
-                    status, opened = open_pool(self.pool_name)
-                    self.assertEqual(status, PoolStatus.Ok)
-                    status, pool = attach_pool(opened)
+                    status, pool = attach_pool(received)
                     self.assertEqual(status, PoolStatus.Ok)
 
             with self._step():
@@ -205,11 +210,8 @@ class TestSharedHostPoolCrossProcess(TestCase):
                     status, descriptor = create_pool(config)
                     self.assertEqual(status, PoolStatus.Ok)
 
-            with self._step():
-                if self.comm_rank == 1:
-                    # Process 1 holds a descriptor but doesn't attach yet
-                    status, old = open_pool(self.pool_name)
-                    self.assertEqual(status, PoolStatus.Ok)
+            # Process 1 receives the first descriptor but doesn't attach yet
+            old = self._broadcast(descriptor)
 
             with self._step():
                 if self.comm_rank == 0:

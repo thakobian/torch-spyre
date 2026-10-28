@@ -70,6 +70,7 @@ namespace fs = std::filesystem;
 namespace spyre {
 
 static constexpr int32_t kSpyreTensorLayoutPickleVersion = 4;
+static constexpr int32_t kPoolDescriptorPickleVersion = 1;
 
 std::atomic<bool> g_downcast_warn_enabled{true};
 
@@ -351,12 +352,55 @@ PYBIND11_MODULE(_C, m) {
             config.compatibility.assign(tag.begin(), tag.end());
           });
 
-  // Only returned by create_pool()/open_pool(); never built in Python.
+  // Returned by create_pool()/open_pool(). Picklable so a delegator can send
+  // it to workers; attach_pool() re-checks it against the pool either way.
   py::class_<flex::PoolDescriptor>(m, "PoolDescriptor")
       .def_readonly("name", &flex::PoolDescriptor::name)
       .def_readonly("generation", &flex::PoolDescriptor::generation)
       .def_readonly("state", &flex::PoolDescriptor::state)
-      .def_readonly("config", &flex::PoolDescriptor::config);
+      .def_readonly("config", &flex::PoolDescriptor::config)
+      .def(py::pickle(
+          [](const flex::PoolDescriptor& descriptor) {  // __getstate__
+            // If the pickle format changes, then update
+            // kPoolDescriptorPickleVersion but keep the tuple as the returned
+            // object and the first element to be the version
+            const flex::PoolConfig& config = descriptor.config;
+            return py::make_tuple(
+                spyre::kPoolDescriptorPickleVersion, descriptor.name,
+                descriptor.generation, static_cast<uint32_t>(descriptor.state),
+                config.name, static_cast<uint32_t>(config.backend),
+                config.num_slots, config.slot_bytes,
+                py::bytes(
+                    reinterpret_cast<const char*>(config.compatibility.data()),
+                    config.compatibility.size()));
+          },
+          [](py::tuple t) {  // __setstate__
+            int32_t version = t[0].cast<int32_t>();
+            if (version != 1) {
+              throw py::value_error(
+                  "Unsupported PoolDescriptor pickle version; it was pickled "
+                  "by a different torch_spyre build");
+            }
+            // Version 1: (version, name, generation, state, config name,
+            // backend, num_slots, slot_bytes, compatibility)
+            if (t.size() != 9) {
+              throw py::value_error(
+                  "Invalid PoolDescriptor pickle v1: wrong tuple size");
+            }
+            flex::PoolDescriptor descriptor;
+            descriptor.name = t[1].cast<std::string>();
+            descriptor.generation = t[2].cast<uint64_t>();
+            descriptor.state =
+                static_cast<flex::PoolState>(t[3].cast<uint32_t>());
+            descriptor.config.name = t[4].cast<std::string>();
+            descriptor.config.backend =
+                static_cast<flex::PoolBackend>(t[5].cast<uint32_t>());
+            descriptor.config.num_slots = t[6].cast<size_t>();
+            descriptor.config.slot_bytes = t[7].cast<size_t>();
+            const std::string tag = t[8].cast<std::string>();
+            descriptor.config.compatibility.assign(tag.begin(), tag.end());
+            return descriptor;
+          }));
 
   // smart_holder lets detach_pool() take the pool's unique_ptr back from
   // Python, which flex::DetachPool() requires.
