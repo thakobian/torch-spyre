@@ -415,8 +415,11 @@ PYBIND11_MODULE(_C, m) {
   m.def(
       "create_pool",
       [](const flex::PoolConfig& config) {
+        // Copy while holding the GIL: once it is released, another thread
+        // could modify the Python object flex is reading.
+        const flex::PoolConfig config_copy = config;
         py::gil_scoped_release release;
-        auto result = flex::CreatePool(config);
+        auto result = flex::CreatePool(config_copy);
         return std::make_pair(result.status, result.descriptor);
       },
       py::arg("config"));
@@ -428,19 +431,29 @@ PYBIND11_MODULE(_C, m) {
         return std::make_pair(result.status, result.descriptor);
       },
       py::arg("name"));
-  m.def("destroy_pool", &flex::DestroyPool, py::arg("descriptor"),
-        py::call_guard<py::gil_scoped_release>());
+  m.def(
+      "destroy_pool",
+      [](const flex::PoolDescriptor& descriptor) {
+        // Copy while holding the GIL, as in create_pool().
+        const flex::PoolDescriptor descriptor_copy = descriptor;
+        py::gil_scoped_release release;
+        return flex::DestroyPool(descriptor_copy);
+      },
+      py::arg("descriptor"));
 
   // Worker side: attaching pins the data segment for this process's device.
   m.def(
       "attach_pool",
       [](const flex::PoolDescriptor& descriptor) {
         spyre::startRuntime();
+        // Copy while holding the GIL, as in create_pool().
+        const flex::PoolDescriptor descriptor_copy = descriptor;
         flex::AttachResult result;
         {
           // Reacquire the GIL before building the Python tuple below.
           py::gil_scoped_release release;
-          result = flex::AttachPool(spyre::GlobalRuntime::get(), descriptor);
+          result =
+              flex::AttachPool(spyre::GlobalRuntime::get(), descriptor_copy);
         }
         return py::make_tuple(result.status, std::move(result.pool));
       },
