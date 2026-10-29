@@ -433,25 +433,40 @@ PYBIND11_MODULE(_C, m) {
       .def("name", &flex::SharedPool::Name)
       .def("total_bytes", &flex::SharedPool::TotalBytes);
 
+  // (status, descriptor), with None for the descriptor on failure, like
+  // attach_pool(). Builds Python objects, so call it with the GIL held.
+  auto descriptor_result = [](const flex::PoolDescriptorResult& result) {
+    if (result.status != flex::PoolStatus::Ok) {
+      return py::make_tuple(result.status, py::none());
+    }
+    return py::make_tuple(result.status, result.descriptor);
+  };
+
   // Delegator side: no device needed. CreatePool() and DestroyPool() wait on
   // a per-name lock another process may hold, so release the GIL.
   m.def(
       "create_pool",
-      [](const flex::PoolConfig& config) {
+      [descriptor_result](const flex::PoolConfig& config) {
         // Copy while holding the GIL: once it is released, another thread
         // could modify the Python object flex is reading.
         const flex::PoolConfig config_copy = config;
-        py::gil_scoped_release release;
-        auto result = flex::CreatePool(config_copy);
-        return std::make_pair(result.status, result.descriptor);
+        flex::PoolDescriptorResult result;
+        {
+          py::gil_scoped_release release;
+          result = flex::CreatePool(config_copy);
+        }
+        return descriptor_result(result);
       },
       py::arg("config"));
   m.def(
       "open_pool",
-      [](const std::string& name) {
-        py::gil_scoped_release release;
-        auto result = flex::OpenPool(name);
-        return std::make_pair(result.status, result.descriptor);
+      [descriptor_result](const std::string& name) {
+        flex::PoolDescriptorResult result;
+        {
+          py::gil_scoped_release release;
+          result = flex::OpenPool(name);
+        }
+        return descriptor_result(result);
       },
       py::arg("name"));
   m.def(

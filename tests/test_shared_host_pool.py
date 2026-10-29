@@ -122,8 +122,9 @@ class TestSharedHostPool(TestCase):
 
         # The name is taken, so a second create fails even with a different
         # geometry; it never resizes or replaces the existing pool
-        status, _ = create_pool(PoolConfig(self.pool_name, 10, 10))
+        status, descriptor = create_pool(PoolConfig(self.pool_name, 10, 10))
         self.assertEqual(status, PoolStatus.AlreadyExists)
+        self.assertIsNone(descriptor)
 
     def test_no_host_pointer(self):
         # Create and attach a shared pool
@@ -174,8 +175,9 @@ class TestSharedHostPool(TestCase):
         self.assertEqual(opened.generation, descriptor.generation)
 
     def test_open_missing_pool(self):
-        status, _ = open_pool(self.pool_name)
+        status, descriptor = open_pool(self.pool_name)
         self.assertEqual(status, PoolStatus.NotFound)
+        self.assertIsNone(descriptor)
 
     def test_destroy_while_attached(self):
         descriptor = self._create()
