@@ -473,12 +473,19 @@ PYBIND11_MODULE(_C, m) {
   m.def(
       "detach_pool",
       [](const py::object& pool) {
+        // Take the pool out of the Python object while holding the GIL.
+        std::unique_ptr<flex::SharedPool> owned;
         try {
-          flex::DetachPool(py::cast<std::unique_ptr<flex::SharedPool>>(pool));
+          owned = py::cast<std::unique_ptr<flex::SharedPool>>(pool);
         }
         catch (const py::value_error&) {
           // smart_holder reports an already detached handle as value_error.
+          return;
         }
+        // Unpinning and unmapping a large pool can take a while; let other
+        // Python threads run meanwhile.
+        py::gil_scoped_release release;
+        flex::DetachPool(std::move(owned));
       },
       py::arg("pool"));
 
