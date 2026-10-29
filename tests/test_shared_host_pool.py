@@ -14,7 +14,6 @@
 
 
 import gc
-import os
 import pickle
 import uuid
 from multiprocessing import shared_memory
@@ -52,24 +51,8 @@ class TestSharedHostPool(TestCase):
         super().setUp()
         # Pools outlive the process that made them, so a killed run leaves its
         # pool behind. A per-run name keeps that leftover from colliding with
-        # this run, and recovery removes leftovers from earlier runs.
+        # this run.
         self.pool_name = f"{self.id()}.{uuid.uuid4().hex}"
-        self._remove_leftover_pools()
-
-    def _remove_leftover_pools(self):
-        """Destroy pools left behind by earlier, killed runs of this test."""
-        if not os.path.isdir("/dev/shm"):
-            return
-        prefix = f"{self.id()}."
-        for entry in os.listdir("/dev/shm"):
-            # A pool is "<prefix><hex>"; its .lock, .data. and .tmp. files are
-            # flex's to manage
-            if not entry.startswith(prefix) or "." in entry[len(prefix) :]:
-                continue
-            status, descriptor = open_pool(entry)
-            if status == PoolStatus.Ok:
-                # PoolBusy means a live run still uses it, so leave it alone
-                destroy_pool(descriptor)
 
     def _destroy_checked(self, descriptor):
         # NotFound means the test destroyed the pool itself. Anything else,
