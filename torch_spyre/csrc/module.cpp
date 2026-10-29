@@ -384,8 +384,12 @@ PYBIND11_MODULE(_C, m) {
                     config.compatibility.size()));
           },
           [](py::tuple t) {  // __setstate__
+            if (t.size() == 0) {
+              throw py::value_error(
+                  "Invalid PoolDescriptor pickle: empty state");
+            }
             int32_t version = t[0].cast<int32_t>();
-            if (version != 1) {
+            if (version != spyre::kPoolDescriptorPickleVersion) {
               throw py::value_error(
                   "Unsupported PoolDescriptor pickle version; it was pickled "
                   "by a different torch_spyre build");
@@ -396,14 +400,24 @@ PYBIND11_MODULE(_C, m) {
               throw py::value_error(
                   "Invalid PoolDescriptor pickle v1: wrong tuple size");
             }
+            // Reject values outside the enums instead of casting them blindly
+            const uint32_t state = t[3].cast<uint32_t>();
+            const uint32_t backend = t[5].cast<uint32_t>();
+            if (state < static_cast<uint32_t>(flex::PoolState::Initializing) ||
+                state > static_cast<uint32_t>(flex::PoolState::Destroying)) {
+              throw py::value_error(
+                  "Invalid PoolDescriptor pickle v1: unknown state");
+            }
+            if (backend != static_cast<uint32_t>(flex::PoolBackend::HostDram)) {
+              throw py::value_error(
+                  "Invalid PoolDescriptor pickle v1: unknown backend");
+            }
             flex::PoolDescriptor descriptor;
             descriptor.name = t[1].cast<std::string>();
             descriptor.generation = t[2].cast<uint64_t>();
-            descriptor.state =
-                static_cast<flex::PoolState>(t[3].cast<uint32_t>());
+            descriptor.state = static_cast<flex::PoolState>(state);
             descriptor.config.name = t[4].cast<std::string>();
-            descriptor.config.backend =
-                static_cast<flex::PoolBackend>(t[5].cast<uint32_t>());
+            descriptor.config.backend = static_cast<flex::PoolBackend>(backend);
             descriptor.config.num_slots = t[6].cast<size_t>();
             descriptor.config.slot_bytes = t[7].cast<size_t>();
             const std::string tag = t[8].cast<std::string>();
