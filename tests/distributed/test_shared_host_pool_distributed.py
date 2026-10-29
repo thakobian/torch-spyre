@@ -56,7 +56,6 @@ except ValueError:
         allow_module_level=True,
     )
 
-DEVICE = torch.device(f"spyre:{os.getenv('RANK', '0')}")
 C10D_BACKEND = "spyreccl"
 
 
