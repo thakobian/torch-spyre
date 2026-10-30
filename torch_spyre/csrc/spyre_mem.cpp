@@ -1148,6 +1148,9 @@ flex::Range derive_kv_page_range(const at::Tensor& cache, size_t block_id) {
 void copy_kv_page_raw(const at::Tensor& cache, size_t block_id,
                       const flex::SharedPool& pool, size_t slot_id,
                       bool to_device) {
+  TORCH_CHECK(cache.is_privateuseone(),
+              "copy_kv_page_raw: cache must be a Spyre tensor, got one on ",
+              cache.device());
   c10::Device device = cache.device();
   SpyreStream stream = getCurrentStream(device);
 
