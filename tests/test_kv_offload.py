@@ -20,7 +20,7 @@ from torch.testing._internal.common_utils import (
     run_tests,
 )
 
-from torch_spyre._C import (  # type: ignore[attr-defined]
+from torch_spyre._C import (
     PoolConfig,
     PoolStatus,
     SpyreTensorLayout,

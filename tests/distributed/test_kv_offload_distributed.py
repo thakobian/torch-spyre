@@ -22,7 +22,7 @@ import torch
 import torch.distributed as dist
 from torch.testing._internal.common_utils import TestCase, run_tests
 
-from torch_spyre._C import (  # type: ignore[attr-defined]
+from torch_spyre._C import (
     PoolConfig,
     PoolStatus,
     SpyreTensorLayout,
