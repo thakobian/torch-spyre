@@ -524,8 +524,8 @@ void SpyreStream::launch(const JobPlan& plan,
 
   // Create launch context with tensor arguments and typed symbolic payload.
   // symbolic_args is moved in so the closure in
-  // JobPlanStepHostCompute::construct can capture it by value without an
-  // extra copy.
+  // JobPlanStepHostCompute::construct can capture it by value without an extra
+  // copy.
   LaunchContext ctx{args, std::move(symbolic_args)};
   const size_t max_corrections =
       s_dev.resolveRuntimeHandle()->maxProgramCorrections();
@@ -595,9 +595,8 @@ void initializeStreamPoolImpl(c10::DeviceIndex device_index) {
     c10::StreamId sid = kHostComputeStreamStartPerDevice + i;
     // Create the flex handle only if this stream id has not been registered
     // yet. stream_handle_map is keyed by stream id, not device, so when the
-    // pool is initialized under more than one device index in the same
-    // process (all mapping to the same runtime) the handle is created once
-    // and reused.
+    // pool is initialized under more than one device index in the same process
+    // (all mapping to the same runtime) the handle is created once and reused.
     TORCH_CHECK(
         pool.stream_handle_map.find(sid) == pool.stream_handle_map.end(),
         "Host compute stream id ", sid,
@@ -725,8 +724,7 @@ SpyreStream getStreamFromPool(c10::Device device, int priority) {
   }
 
   // Ensure runtime is initialized before creating streams
-  // This is critical when torch.Stream() is called before any tensor
-  // operations
+  // This is critical when torch.Stream() is called before any tensor operations
   startRuntime();
 
   initializeStreamPool(device.index());

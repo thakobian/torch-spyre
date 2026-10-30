@@ -43,8 +43,8 @@ void copy_kv_page_raw(const at::Tensor& cache, size_t block_id,
  * on-device without allocating a host buffer or performing an H2D DMA.
  *
  * @param self The spyre tensor to fill (in-place)
- * @param value The fill value as a double (converted to the correct
- * hardware pattern based on the tensor's dtype)
+ * @param value The fill value as a double (converted to the correct hardware
+ *              pattern based on the tensor's dtype)
  * @return The filled tensor (same as self)
  */
 at::Tensor spyre_fill_tensor(const at::Tensor& self, double value);
