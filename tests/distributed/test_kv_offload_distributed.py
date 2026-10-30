@@ -15,6 +15,7 @@
 import contextlib
 import os
 import uuid
+from datetime import timedelta
 
 import pytest
 import torch
@@ -115,7 +116,11 @@ class TestKVOffloadCrossProcess(TestCase):
             )
 
         if not dist.is_initialized():
-            dist.init_process_group(f"cpu:gloo,spyre:{C10D_BACKEND}")
+            # A rank that dies outright (not just raises) would otherwise leave
+            # its peer waiting the default 30 minutes in the next collective
+            dist.init_process_group(
+                f"cpu:gloo,spyre:{C10D_BACKEND}", timeout=timedelta(minutes=5)
+            )
 
         cls.comm_size = dist.get_world_size()
         cls.comm_rank = dist.get_rank()
@@ -208,13 +213,14 @@ class TestKVOffloadCrossProcess(TestCase):
                     copy_kv_page_raw(reloaded_cache, BLOCK_ID, pool, 0, to_device=True)
                     detach_pool(pool)
 
-                    # Verify the reloaded page matches byte for byte, with zero
-                    # tolerance
-                    reloaded = reloaded_cache.to("cpu")[BLOCK_ID].contiguous()
-                    expected = cache.to("cpu")[BLOCK_ID].contiguous()
+                    # The whole reloaded cache must match byte for byte: the
+                    # source page at BLOCK_ID and zeros everywhere else, so a
+                    # write into a neighboring page is caught too
+                    expected = torch.zeros(kv_cache_shape, dtype=torch.float16)
+                    expected[BLOCK_ID] = cache.to("cpu")[BLOCK_ID]
                     self.assertEqual(
-                        reloaded.view(torch.uint8),
-                        expected.view(torch.uint8),
+                        reloaded_cache.to("cpu").contiguous().view(torch.uint8),
+                        expected.contiguous().view(torch.uint8),
                         rtol=0,
                         atol=0,
                     )
