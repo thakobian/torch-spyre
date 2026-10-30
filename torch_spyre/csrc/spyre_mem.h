@@ -36,7 +36,7 @@ at::Tensor spyre_copy_from(const at::Tensor& self, const at::Tensor& dst,
 
 void copy_kv_page_raw(const at::Tensor& cache, size_t block_id,
                       const flex::SharedPool& pool, size_t slot_id,
-                      bool to_device, bool non_blocking);
+                      bool to_device);
 
 /**
  * Uses flex::RuntimeStream::fillAsync() to perform the fill entirely

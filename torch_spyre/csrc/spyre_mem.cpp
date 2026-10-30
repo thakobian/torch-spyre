@@ -1147,7 +1147,7 @@ flex::Range derive_kv_page_range(const at::Tensor& cache, size_t block_id) {
 
 void copy_kv_page_raw(const at::Tensor& cache, size_t block_id,
                       const flex::SharedPool& pool, size_t slot_id,
-                      bool to_device, bool non_blocking) {
+                      bool to_device) {
   c10::Device device = cache.device();
   SpyreStream stream = getCurrentStream(device);
 
@@ -1163,9 +1163,9 @@ void copy_kv_page_raw(const at::Tensor& cache, size_t block_id,
              &flex::destroyCopyRawParams);
   stream.launchCopyRaw(params.get());
 
-  if (!non_blocking) {
-    stream.synchronize();
-  }
+  // Always wait: nothing keeps the pool mapped while a DMA is in flight, so
+  // returning early would let the caller detach or destroy it mid-copy.
+  stream.synchronize();
 }
 
 /**

@@ -493,7 +493,6 @@ PYBIND11_MODULE(_C, m) {
         "Copy one KV cache page between host pool and device using DMA",
         py::arg("cache"), py::arg("block_id"), py::arg("pool"),
         py::arg("slot_id"), py::arg("to_device"),
-        py::arg("non_blocking") = false,
         py::call_guard<py::gil_scoped_release>());
 
   // Device-side fill using FillDMA (no host buffer or H2D copy)
