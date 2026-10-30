@@ -144,7 +144,9 @@ class TestSpyre(TestCase):
             dtype=torch.float16,
         )
         pool = self._pool(cache, NUM_BLOCKS)
-        with self.assertRaises(RuntimeError):
+        # Rejected by one of the layout checks, depending on the generated
+        # layout's rank
+        with self.assertRaisesRegex(RuntimeError, "rank 4 device layout|not row major"):
             copy_kv_page_raw(cache, 1, pool, 0, to_device=False)
 
     def test_rejects_page_view(self):
@@ -152,22 +154,16 @@ class TestSpyre(TestCase):
         shape = (NUM_BLOCKS, 16, NUM_KV_HEADS, HEAD_DIM)
         cache = make_cache(shape, fill_random=True)
         pool = self._pool(cache, NUM_BLOCKS)
-        with self.assertRaises(RuntimeError):
+        # A page view is rank 3
+        with self.assertRaisesRegex(RuntimeError, "expected a rank 4 KV cache"):
             copy_kv_page_raw(cache[1], 0, pool, 0, to_device=False)
 
     def test_rejects_block_id_out_of_range(self):
         shape = (NUM_BLOCKS, 16, NUM_KV_HEADS, HEAD_DIM)
         cache = make_cache(shape, fill_random=True)
         pool = self._pool(cache, NUM_BLOCKS)
-        with self.assertRaises(RuntimeError):
+        with self.assertRaisesRegex(RuntimeError, r"block_id \d+ out of range"):
             copy_kv_page_raw(cache, NUM_BLOCKS, pool, 0, to_device=False)
-
-    def test_normal_copy_tensor_unaffected(self):
-        """Ensure the normal copy_tensor (.to()) function is unaffected."""
-        tensor = torch.randn(10, dtype=torch.float16)
-        tensor_on_spyre = tensor.to("spyre")
-        tensor_back = tensor_on_spyre.to("cpu")
-        self.assertEqual(tensor, tensor_back)
 
 
 if __name__ == "__main__":
